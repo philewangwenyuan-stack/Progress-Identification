@@ -21,6 +21,20 @@ class ZoneProgressTracker:
         self.current_stage = state['stage']
         self.is_current_floor_poured = bool(state['is_poured'])
 
+        self.zone_name = zone_name
+        self.db_path = db_path
+        state = self._load_state_from_db()
+        self.current_floor = str(state['floor'])
+        self.current_stage = state['stage']
+        self.is_current_floor_poured = bool(state['is_poured'])
+
+    def refresh_from_db(self):
+        """强制从数据库读取最新状态，覆盖 AI 的内存缓存"""
+        state = self._load_state_from_db()
+        self.current_floor = str(state['floor'])
+        self.current_stage = state['stage']
+        self.is_current_floor_poured = bool(state['is_poured'])
+
     def _load_state_from_db(self):
         # 确保目录存在
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
@@ -182,3 +196,36 @@ class ProjectProgressManager:
                            (str(target_floor), target_stage, zone_name))
             conn.commit()
         print(f"!!! [手动修正] {zone_name} 已强制重置为 {target_floor} 层 {target_stage}")
+
+    def manual_fix_zone(self, zone_name, target_floor, target_stage="模板阶段"):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE zone_states_v2 SET floor = ?, stage = ?, is_poured = 0 WHERE zone_name = ?", 
+                           (str(target_floor), target_stage, zone_name))
+            conn.commit()
+        
+        # ==== 核心修复：更新数据库后，立刻通知该区域的 AI 刷新内存缓存 ====
+        if zone_name in self.zones:
+            self.zones[zone_name].refresh_from_db()    
+
+    # ==== 新增：毁灭级重置功能 ====
+    def reset_project(self):
+        """标准安全重置：通过 SQL 清空数据内容，避免 Windows 文件锁定冲突"""
+        
+        # 1. 安全清空所有表里的数据（不删物理文件，彻底告别 500 报错）
+        with sqlite3.connect(self.db_path, timeout=10) as conn:
+            cursor = conn.cursor()
+            try:
+                # 瞬间清空两张核心表里的所有数据
+                cursor.execute("DELETE FROM zone_states_v2")
+                cursor.execute("DELETE FROM stage_timeline")
+                # 将时间轴的自增 ID 归零 (防报错处理)
+                cursor.execute("DELETE FROM sqlite_sequence WHERE name='stage_timeline'")
+            except Exception as e:
+                pass # 首次运行如果没有表，直接忽略即可
+            conn.commit()
+        
+        # 2. 彻底清空大模型在内存里的状态机缓存
+        self.zones.clear()
+        
+        print("!!! [系统提示] 数据库内容已通过 SQL 安全清空，内存已释放，全盘重置完成 !!!")
