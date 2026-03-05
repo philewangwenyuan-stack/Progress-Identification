@@ -1,4 +1,4 @@
-<template>
+抓拍<template>
   <div class="screen-container">
     
     <div class="dashboard-wrapper" :style="wrapperStyle">
@@ -6,7 +6,7 @@
       <header class="cscec-header">
         <div class="header-left">
           <div class="logo">CSCEC</div>
-          <h1 class="sys-title">施工现场智能进度数字监控舱</h1>
+          <h1 class="sys-title">中建四局进度自动识别算法</h1>
         </div>
         <div class="header-right">
           <el-button type="danger" plain size="large" @click="confirmReset">
@@ -39,7 +39,7 @@
               </div>
               <div class="action-bar">
                 <el-button type="primary" size="large" class="analyze-btn" :loading="isCapturing" @click="triggerManualCapture">
-                  📸 抓拍并运行 Qwen-VL-Max 分析
+                  📸 手动抓拍并运行大模型分析
                 </el-button>
               </div>
             </el-card>
@@ -99,9 +99,12 @@
                   </el-select>
                 </div>
               </template>
+        
               <el-table 
                 :data="timelineData" 
                 :span-method="mergeFloorCells"
+                @row-click="showTimelineDetails"
+                style="cursor: pointer;"
                 height="100%" 
                 stripe 
                 border
@@ -156,12 +159,14 @@
       <el-form :model="manualForm" label-width="80px">
         <el-form-item label="施工区域">
           <el-select v-model="manualForm.zone_name" style="width: 100%">
-            <el-option v-for="item in progressData" :key="item.zone_name" :label="item.zone_name" :value="item.zone_name" />
+            <el-option v-for="zone in manualFormZoneOptions" :key="zone" :label="zone" :value="zone" />
           </el-select>
         </el-form-item>
         <el-form-item label="目标楼层">
-          <el-input v-model="manualForm.target_floor"></el-input>
-        </el-form-item>
+          <el-select v-model="manualForm.target_floor" style="width: 100%">
+            <el-option v-for="floor in config.floors" :key="floor" :label="floor + '层'" :value="floor" />
+          </el-select>
+        </el-form-item>  
         <el-form-item label="目标工序">
           <el-select v-model="manualForm.target_stage" style="width: 100%">
             <el-option label="模板阶段" value="模板阶段" />
@@ -175,6 +180,44 @@
         <el-button type="primary" @click="submitManualFix">确认修正</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog 
+      v-model="detailsVisible" 
+      title="📋 工序阶段与人员抓拍台账" 
+      width="650px" 
+      append-to-body
+      destroy-on-close
+      style="z-index: 9999 !important;"
+    >
+      <div v-if="currentDetails" class="details-panel">
+        <div class="summary-box">
+          <p><b>施工阶段：</b> <el-tag>{{ currentDetails?.stage || '未知' }}</el-tag> ({{ currentDetails?.floor || '-' }}F)</p>
+          <p><b>起止时间：</b> {{ currentDetails?.start_time || '-' }} 至 {{ currentDetails?.end_time || '进行中 (至今)' }}</p>
+          <p><b>视觉抓拍总次数：</b> <b>{{ currentDetails?.count || 0 }}</b> 次</p>
+          <p><b>阶段平均作业人数：</b> <span style="color: #409EFF; font-weight: bold; font-size: 18px;">{{ currentDetails?.avg_workers || 0 }}</span> 人</p>
+        </div>
+        
+        <div style="margin: 20px 0; border-top: 1px dashed #dcdfe6; position: relative; text-align: center;">
+          <span style="position: absolute; top: -10px; left: 50%; transform: translateX(-50%); background: #fff; padding: 0 10px; color: #909399; font-size: 14px;">历史识别追踪记录</span>
+        </div>
+        
+        <div class="log-history-list">
+          <div v-if="!currentDetails?.logs || currentDetails.logs.length === 0" style="text-align: center; color: #999; margin-top: 20px;">
+            暂无对应的抓拍日志。
+          </div>
+          <div v-else>
+            <div v-for="(log, idx) in currentDetails.logs" :key="idx" class="history-item">
+              <div class="item-header">
+                <span class="time">{{ log['识别时间'] || '未知时间' }}</span>
+                <span class="workers">作业人数: {{ log['人数'] || '未知' }}</span>
+              </div>
+              <div class="item-desc"><b>视觉分析：</b>{{ log['视觉确认描述'] || '无详细描述' }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </el-dialog>
+    
   </div>
 </template>
 
@@ -185,6 +228,62 @@ import { Setting, Edit, Delete } from '@element-plus/icons-vue'
 import axios from 'axios'
 
 const apiBase = 'http://localhost:8000/api'
+
+// 解决 Bug 4: 即使在重置后，下拉框也能保底显示当前配置里的绑定区域
+const manualFormZoneOptions = computed(() => {
+  const zones = progressData.value.map(p => p.zone_name)
+  if (config.value.current_zone && !zones.includes(config.value.current_zone)) {
+    zones.push(config.value.current_zone)
+  }
+  return zones
+})
+
+// 需求 2: 弹窗展示状态
+const detailsVisible = ref(false)
+const currentDetails = ref(null)
+
+const showTimelineDetails = async (row) => {
+  if (!row || !row.start_time) {
+    ElMessage.warning("该行数据异常，缺少时间节点！");
+    return;
+  }
+  
+  try {
+    // 1. 发起请求前给提示
+    ElMessage.info("正在拉取详细台账数据...");
+    
+    const endTimeParam = row.end_time ? row.end_time : '';
+    const res = await axios.get(`${apiBase}/timeline/details`, {
+      params: { 
+        zone_name: selectedZone.value, 
+        start_time: row.start_time, 
+        end_time: endTimeParam 
+      }
+    });
+    
+    // 2. 打印后端真实返回的数据（您可以按 F12 看看打印出来的东西）
+    console.log("👉 后端返回的弹窗数据:", res.data);
+    
+    // 3. 赋值并强制打开弹窗
+    currentDetails.value = { ...row, ...res.data };
+    detailsVisible.value = true;
+    
+  } catch(e) { 
+    console.error("台账详情请求失败:", e);
+    ElMessage.error("获取详情失败，请按 F12 查看控制台报错");
+  }
+}
+
+// 解决 Bug 3: 刷新后获取最新大模型日志
+const fetchLatestLog = async () => {
+  try {
+    const res = await axios.get(`${apiBase}/logs/latest`)
+    if (res.data.data) {
+      llmRawResult.value = res.data.data
+      addLog("已恢复最新一条历史 AI 识别记录", "info")
+    }
+  } catch (e) {}
+}
 
 // ==== 核心：硬核物理绝对居中计算引擎 ====
 const scale = ref(1)
@@ -351,6 +450,7 @@ onMounted(() => {
 
   fetchConfig()
   fetchProgress()
+  fetchLatestLog() 
   snapshotUrl.value = `${apiBase}/snapshot/latest?t=${new Date().getTime()}`
   addLog("系统初始化成功，大模型引擎就绪。", "info")
   setInterval(() => { fetchProgress() }, 60000)
@@ -462,4 +562,14 @@ onUnmounted(() => {
 .blinking { animation: blinker 1.5s linear infinite; }
 @keyframes blinker { 50% { opacity: 0.4; } }
 .help-text { font-size: 13px; color: #909399; margin-top: 6px; }
+
+.summary-box { background: #f4f4f5; padding: 15px; border-radius: 6px; font-size: 15px; color: #333; line-height: 1.8;}
+.summary-box p { margin: 5px 0; }
+.log-history-list { max-height: 350px; overflow-y: auto; padding-right: 10px; }
+.history-item { border-left: 3px solid #004b87; background: #fff; padding: 12px; margin-bottom: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); border-radius: 0 4px 4px 0;}
+.item-header { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 14px; font-weight: bold; color: #606266;}
+.item-header .time { color: #909399; font-weight: normal;}
+.item-desc { font-size: 14px; color: #303133; line-height: 1.5;}
+
+
 </style>

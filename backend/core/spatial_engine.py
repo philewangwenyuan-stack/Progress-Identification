@@ -189,20 +189,26 @@ class ProjectProgressManager:
         print(result["msg"])
 
     def manual_fix_zone(self, zone_name, target_floor, target_stage="模板阶段"):
-        """手动修正大跳层或识别异常"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute("UPDATE zone_states_v2 SET floor = ?, stage = ?, is_poured = 0 WHERE zone_name = ?", 
-                           (str(target_floor), target_stage, zone_name))
+            # 解决 BUG: 判断该区域是否已存在，存在则更新，不存在(如重置后)则插入新记录
+            cursor.execute("SELECT 1 FROM zone_states_v2 WHERE zone_name = ?", (zone_name,))
+            if cursor.fetchone():
+                cursor.execute("UPDATE zone_states_v2 SET floor = ?, stage = ?, is_poured = 0 WHERE zone_name = ?", 
+                               (str(target_floor), target_stage, zone_name))
+            else:
+                cursor.execute("INSERT INTO zone_states_v2 (zone_name, floor, stage, is_poured) VALUES (?, ?, ?, 0)", 
+                               (zone_name, str(target_floor), target_stage))
             conn.commit()
+        
+        # 核心修复：更新数据库后，立刻通知该区域的 AI 刷新内存缓存。
+        # 如果大模型内存里还没有这个区域(刚重置完)，就立刻实例化它，保证后续抓拍不会乱！
+        if zone_name in self.zones:
+            self.zones[zone_name].refresh_from_db()    
+        else:
+            self.zones[zone_name] = ZoneProgressTracker(zone_name, db_path=self.db_path)
+            
         print(f"!!! [手动修正] {zone_name} 已强制重置为 {target_floor} 层 {target_stage}")
-
-    def manual_fix_zone(self, zone_name, target_floor, target_stage="模板阶段"):
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("UPDATE zone_states_v2 SET floor = ?, stage = ?, is_poured = 0 WHERE zone_name = ?", 
-                           (str(target_floor), target_stage, zone_name))
-            conn.commit()
         
         # ==== 核心修复：更新数据库后，立刻通知该区域的 AI 刷新内存缓存 ====
         if zone_name in self.zones:

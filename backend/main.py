@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime
+import re
 
 # 引入您现有的核心组件 (完全复用)
 from config import settings
@@ -92,7 +93,7 @@ def auto_capture_task():
                 if should_capture:
                     success, path = capture_rtsp_frame(rtsp_url, SNAPSHOT_PATH)
                     if success:
-                        result = parser.parse_instruction_with_image("请识别当前施工工序", path)
+                        result = parser.parse_instruction_with_image("请识别当前施工工序", path, zone_name)
                         result["位置"] = zone_name
                         manager.parse_json_log(result)
         except Exception as e:
@@ -139,7 +140,7 @@ def manual_capture():
         
     success, msg = capture_rtsp_frame(rtsp_url, SNAPSHOT_PATH)
     if success:
-        result = parser.parse_instruction_with_image("请识别当前施工工序", SNAPSHOT_PATH)
+        result = parser.parse_instruction_with_image("请识别当前施工工序", SNAPSHOT_PATH, zone_name)
         result["位置"] = zone_name 
         manager.parse_json_log(result)
         
@@ -208,3 +209,74 @@ def reset_project_api():
         return {"status": "success", "message": "系统数据已全部清空，项目已重置归零！"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+
+@app.get("/api/logs/latest")
+def get_latest_log():
+    """解决 Bug 3: 获取最近一次的 AI 识别记录，用于页面刷新后回显"""
+    if not os.path.exists(settings.LOG_FILE_PATH):
+        return {"data": None}
+    try:
+        with open(settings.LOG_FILE_PATH, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            if lines:
+                return {"data": json.loads(lines[-1])}
+    except Exception:
+        pass
+    return {"data": None}
+
+
+@app.get("/api/timeline/details")
+def get_timeline_details(zone_name: str, start_time: str, end_time: str = None):
+    """点击时间轴获取该时间段内所有抓拍数据与平均人数 (彻底修复次数计算Bug)"""
+    logs = []
+    total_workers = 0
+    count = 0
+    if os.path.exists(settings.LOG_FILE_PATH):
+        with open(settings.LOG_FILE_PATH, 'r', encoding='utf-8') as f:
+            for line in f:
+                try:
+                    data = json.loads(line)
+                    
+                    # 兼容处理历史脏数据：只对明确标记了其他具体区域的进行拦截
+                    saved_zone = data.get('位置', '')
+                    if saved_zone and saved_zone != zone_name and saved_zone != "识别失败":
+                        # 假如之前没传zone，大模型胡编了"施工现场"或"工地"，予以放行统计
+                        if "区" in saved_zone or "楼" in saved_zone:
+                            if saved_zone != zone_name: continue
+
+                    log_time_str = data.get('识别时间')
+                    if not log_time_str: continue
+                    
+                    log_time = datetime.strptime(log_time_str, "%Y-%m-%d %H:%M:%S")
+                    start_t = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+                    
+                    # 【修复核心 2】：时间范围改为左闭右开 ( < end_t )，防止跨阶段重复统计同一条抓拍
+                    if end_time:
+                        end_t = datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
+                        in_range = (start_t <= log_time < end_t) 
+                    else:
+                        end_t = datetime.now()
+                        in_range = (start_t <= log_time <= end_t)
+                    
+                    if in_range:
+                        logs.append(data)
+                        workers = data.get("人数", 0)
+                        if isinstance(workers, str):
+                            nums = re.findall(r'\d+', workers)
+                            workers_cnt = int(nums[0]) if nums else 0
+                        elif isinstance(workers, int):
+                            workers_cnt = workers
+                        else:
+                            workers_cnt = 0
+                        
+                        total_workers += workers_cnt
+                        count += 1
+                except Exception:
+                    continue
+                    
+    avg = round(total_workers / count, 1) if count > 0 else 0
+    logs.reverse() # 倒序，最新的记录在最上面
+    
+    return {"logs": logs, "avg_workers": avg, "count": count}
+                    
