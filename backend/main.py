@@ -12,7 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime
 import re
-
+import asyncio
+from fastapi import WebSocket, WebSocketDisconnect
 
 # 引入现有的核心组件 
 from config import settings
@@ -20,6 +21,36 @@ from core.llm_parser import ConstructionLLMParser
 from core.spatial_engine import ProjectProgressManager
 
 app = FastAPI(title="CSCEC 智能进度监控 API", version="1.0.0")
+# --- WebSocket 连接管理器 ---
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: str):
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(message)
+            except Exception:
+                pass
+
+ws_manager = ConnectionManager()
+main_loop = None
+
+def notify_frontend():
+    """通知前端数据已更新"""
+    if main_loop:
+        asyncio.run_coroutine_threadsafe(
+            ws_manager.broadcast(json.dumps({"event": "update"})), 
+            main_loop
+        )
 
 # 允许跨域，方便前后端分离本地调试
 app.add_middleware(
@@ -97,15 +128,28 @@ def auto_capture_task():
                         result = parser.parse_instruction_with_image("请识别当前施工工序", path, zone_name)
                         result["位置"] = zone_name
                         manager.parse_json_log(result)
+                        notify_frontend()
         except Exception as e:
             print(f"[后台任务异常] {e}")
         time.sleep(30)
 
 @app.on_event("startup")
-def startup_event():
+async def startup_event():
+    global main_loop
+    main_loop = asyncio.get_running_loop()  # 捕获主事件循环，方便子线程调用
     # 启动后台守护线程
     t = threading.Thread(target=auto_capture_task, daemon=True)
     t.start()
+
+# --- 新增的 WebSocket 监听接口 ---
+@app.websocket("/api/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await ws_manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text() # 保持连接心跳
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket)
 
 # ================= API 路由 =================
 
@@ -144,7 +188,7 @@ def manual_capture():
         result = parser.parse_instruction_with_image("请识别当前施工工序", SNAPSHOT_PATH, zone_name)
         result["位置"] = zone_name 
         manager.parse_json_log(result)
-        
+        notify_frontend()
         if result.get("当前作业工序", "识别失败") == "识别失败":
             # 关键修改：加入了 llm_result 字段返回给前端
             return {"status": "warning", "message": "抓拍完成，但 AI 识别异常", "llm_result": result}
@@ -180,7 +224,7 @@ def manual_fix_progress(req: ManualFixRequest):
                               VALUES (?, ?, ?, ?)""", 
                            (req.zone_name, req.target_floor, req.target_stage, record_time))
             conn.commit()
-
+        notify_frontend()  # <--- 新增：手工修正数据后主动推送更新通知给前端
         return {"status": "success", "message": f"{req.zone_name} 已由人工指令强制变更为：{req.target_floor}层 - {req.target_stage}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"手动修改失败: {str(e)}")
@@ -229,30 +273,41 @@ def get_latest_log():
 
 @app.get("/api/timeline/details")
 def get_timeline_details(zone_name: str, start_time: str, end_time: str = None):
-    """点击时间轴获取该时间段内所有抓拍数据与平均人数 (彻底修复次数计算Bug)"""
+    """点击时间轴获取该时间段内所有抓拍数据（合并同名区域，一条记录=一张照片）"""
+    import re
+    from datetime import datetime
+    import json
+    import os
+
     logs = []
-    total_workers = 0
-    count = 0
+    total_workers = 0  # 记录所有照片中出现的人数总和
+    count = 0          # 记录一共抓拍了多少张有效照片
+    
     if os.path.exists(settings.LOG_FILE_PATH):
         with open(settings.LOG_FILE_PATH, 'r', encoding='utf-8') as f:
             for line in f:
                 try:
                     data = json.loads(line)
                     
-                    # 兼容处理历史脏数据：只对明确标记了其他具体区域的进行拦截
+                    # 【核心修复 1】：把所有同名区域合并起来（模糊匹配）
                     saved_zone = data.get('位置', '')
-                    if saved_zone and saved_zone != zone_name and saved_zone != "识别失败":
-                        # 假如之前没传zone，大模型胡编了"施工现场"或"工地"，予以放行统计
-                        if "区" in saved_zone or "楼" in saved_zone:
-                            if saved_zone != zone_name: continue
+                    clean_saved = saved_zone.strip()
+                    clean_target = zone_name.strip()
+                    
+                    # 如果日志里的位置不是空的，也不是“识别失败”
+                    # 那么只要目标区域名称包含在日志名称里，或者日志名称包含在目标名称里，都算匹配！
+                    # （例如："澳门银行" 和 "澳门银行一区" 会被合并算在一起）
+                    if clean_saved and clean_saved != "识别失败":
+                        if clean_target not in clean_saved and clean_saved not in clean_target:
+                            continue # 名字完全不沾边，跳过
 
+                    # 解析时间
                     log_time_str = data.get('识别时间')
                     if not log_time_str: continue
                     
                     log_time = datetime.strptime(log_time_str, "%Y-%m-%d %H:%M:%S")
                     start_t = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
                     
-                    # 【修复核心 2】：时间范围改为左闭右开 ( < end_t )，防止跨阶段重复统计同一条抓拍
                     if end_time:
                         end_t = datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
                         in_range = (start_t <= log_time < end_t) 
@@ -261,23 +316,35 @@ def get_timeline_details(zone_name: str, start_time: str, end_time: str = None):
                         in_range = (start_t <= log_time <= end_t)
                     
                     if in_range:
+                        # 过滤无效记录：如果视觉描述包含“无法识别”或“无有效信息”，则不计入统计
+                        desc = data.get("视觉确认描述", "")
+                        if "无法识别" in desc or "无有效" in desc or "图像内容为空" in desc:
+                            continue
+                            
                         logs.append(data)
-                        workers = data.get("人数", 0)
-                        if isinstance(workers, str):
-                            nums = re.findall(r'\d+', workers)
-                            workers_cnt = int(nums[0]) if nums else 0
-                        elif isinstance(workers, int):
-                            workers_cnt = workers
-                        else:
-                            workers_cnt = 0
                         
+                        # 【核心修复 2】：增强人数解析逻辑
+                        workers = data.get("人数", 0)
+                        workers_cnt = 0
+                        if isinstance(workers, int):
+                            workers_cnt = workers
+                        elif isinstance(workers, str):
+                            nums = re.findall(r'\d+', workers)
+                            if nums:
+                                workers_cnt = int(nums[0])
+                            elif "多" in workers or "若干" in workers:
+                                workers_cnt = 5 # 预估值
+                            else:
+                                workers_cnt = 0
+                            
                         total_workers += workers_cnt
                         count += 1
                 except Exception:
                     continue
                     
-    avg = round(total_workers / count, 1) if count > 0 else 0
+    # 计算该阶段内，每次抓拍画面的平均作业人数
+    avg_workers = round(total_workers / count, 1) if count > 0 else 0
+
     logs.reverse() # 倒序，最新的记录在最上面
     
-    return {"logs": logs, "avg_workers": avg, "count": count}
-                    
+    return {"logs": logs, "avg_workers": avg_workers, "count": count}

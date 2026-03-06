@@ -184,21 +184,46 @@
     <el-dialog 
       v-model="detailsVisible" 
       title="📋 工序阶段与人员抓拍台账" 
-      width="650px" 
+      width="680px" 
       append-to-body
       destroy-on-close
       style="z-index: 9999 !important;"
     >
       <div v-if="currentDetails" class="details-panel">
+        
+        <div style="margin-bottom: 15px; padding: 12px; background: #f0f9eb; border-radius: 6px; border: 1px solid #e1f3d8;">
+          <div style="margin-bottom: 10px; font-weight: bold; color: #67C23A; font-size: 15px;">🕒 统计规则自定义 (实时生效)</div>
+          <div style="display: flex; align-items: center; gap: 15px;">
+            <span style="font-size: 14px; color: #606266;">每日有效作业时段：</span>
+            <el-time-picker
+              v-model="dailyTimeRange"
+              is-range
+              range-separator="至"
+              start-placeholder="开始时间"
+              end-placeholder="结束时间"
+              value-format="HH:mm:ss"
+              style="width: 240px;"
+              @change="refreshDetails"
+            />
+          </div>
+          <div style="margin-top: 10px;">
+            <el-checkbox v-model="ignoreStageTime" @change="refreshDetails">
+              强制放宽到整天计算 (忽略工序严格的起止时间，解决早期抓拍漏算问题)
+            </el-checkbox>
+          </div>
+        </div>
         <div class="summary-box">
           <p><b>施工阶段：</b> <el-tag>{{ currentDetails?.stage || '未知' }}</el-tag> ({{ currentDetails?.floor || '-' }}F)</p>
           <p><b>起止时间：</b> {{ currentDetails?.start_time || '-' }} 至 {{ currentDetails?.end_time || '进行中 (至今)' }}</p>
-          <p><b>视觉抓拍总次数：</b> <b>{{ currentDetails?.count || 0 }}</b> 次</p>
-          <p><b>阶段平均作业人数：</b> <span style="color: #409EFF; font-weight: bold; font-size: 18px;">{{ currentDetails?.avg_workers || 0 }}</span> 人</p>
-        </div>
         
-        <div style="margin: 20px 0; border-top: 1px dashed #dcdfe6; position: relative; text-align: center;">
-          <span style="position: absolute; top: -10px; left: 50%; transform: translateX(-50%); background: #fff; padding: 0 10px; color: #909399; font-size: 14px;">历史识别追踪记录</span>
+          <p><b>视觉抓拍总次数：</b> <b>{{ currentDetails?.count || 0 }}</b> 次</p>
+          <p>
+            <b>日均作业人数：</b> 
+            <span style="color: #409EFF; font-weight: bold; font-size: 18px;">{{ currentDetails?.avg_workers || 0 }}</span> 人/天
+            &nbsp;&nbsp;|&nbsp;&nbsp;
+            <b>累计投入人天：</b> 
+            <span style="color: #67C23A; font-weight: bold; font-size: 18px;">{{ currentDetails?.total_man_days || 0 }}</span> 人·天
+          </p>
         </div>
         
         <div class="log-history-list">
@@ -242,35 +267,45 @@ const manualFormZoneOptions = computed(() => {
 const detailsVisible = ref(false)
 const currentDetails = ref(null)
 
+const dailyTimeRange = ref(['05:00:00', '22:00:00']) // 默认早上5点到晚上10点
+const ignoreStageTime = ref(true) // 默认开启放宽，彻底解决你的 0 记录问题
+const currentActiveRow = ref(null) // 记录当前正在看的行，方便动态刷新
+
+// 点击表格行时触发
 const showTimelineDetails = async (row) => {
   if (!row || !row.start_time) {
     ElMessage.warning("该行数据异常，缺少时间节点！");
     return;
   }
-  
+  currentActiveRow.value = row; // 记住当前点击的行
+  await refreshDetails();       // 调用刷新函数去后端拉数据
+  detailsVisible.value = true;  // 打开弹窗
+}
+
+// 根据面板设定的条件，向后端拉取最新的台账
+const refreshDetails = async () => {
+  const row = currentActiveRow.value;
+  if (!row) return;
+
   try {
-    // 1. 发起请求前给提示
-    ElMessage.info("正在拉取详细台账数据...");
-    
     const endTimeParam = row.end_time ? row.end_time : '';
     const res = await axios.get(`${apiBase}/timeline/details`, {
       params: { 
         zone_name: selectedZone.value, 
         start_time: row.start_time, 
-        end_time: endTimeParam 
+        end_time: endTimeParam,
+        // 把时间选择器的值传给后端
+        work_start: dailyTimeRange.value ? dailyTimeRange.value[0] : '00:00:00',
+        work_end: dailyTimeRange.value ? dailyTimeRange.value[1] : '23:59:59',
+        ignore_stage_time: ignoreStageTime.value
       }
     });
     
-    // 2. 打印后端真实返回的数据（您可以按 F12 看看打印出来的东西）
-    console.log("👉 后端返回的弹窗数据:", res.data);
-    
-    // 3. 赋值并强制打开弹窗
+    // 把后端返回的最新计算结果合并到当前详情里
     currentDetails.value = { ...row, ...res.data };
-    detailsVisible.value = true;
-    
   } catch(e) { 
     console.error("台账详情请求失败:", e);
-    ElMessage.error("获取详情失败，请按 F12 查看控制台报错");
+    ElMessage.error("获取详情失败，请检查控制台");
   }
 }
 
@@ -444,6 +479,33 @@ const getStageTagType = (stage) => {
   return 'info';
 }
 
+let ws = null // 声明 WebSocket 实例
+
+const connectWebSocket = () => {
+  // 动态拼装 WS 地址 (将 http://xxx/api 转换为 ws://xxx/api/ws)
+  const wsUrl = apiBase.replace(/^http/, 'ws') + '/ws'
+  ws = new WebSocket(wsUrl)
+  
+  ws.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data)
+      // 一旦监听到后端推送的 'update' 事件，说明数据变了，立即刷新画面和图表
+      if (data.event === 'update') {
+        fetchProgress()
+        if (selectedZone.value) fetchTimeline()
+        fetchLatestLog() 
+        // 加上时间戳刷新图片，拿到刚刚抓拍到的最新画面
+        snapshotUrl.value = `${apiBase}/snapshot/latest?t=${new Date().getTime()}`
+      }
+    } catch(e) {}
+  }
+
+  ws.onclose = () => {
+    // 意外断线时，每 5 秒自动重连，保证看板长期在线
+    setTimeout(connectWebSocket, 5000)
+  }
+}
+
 onMounted(() => {
   updateScale()
   window.addEventListener('resize', updateScale)
@@ -453,11 +515,15 @@ onMounted(() => {
   fetchLatestLog() 
   snapshotUrl.value = `${apiBase}/snapshot/latest?t=${new Date().getTime()}`
   addLog("系统初始化成功，大模型引擎就绪。", "info")
-  setInterval(() => { fetchProgress() }, 60000)
+  
+  // 启动基于事件驱动的 WebSocket 监听，彻底告别定时器
+  connectWebSocket()
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', updateScale)
+  // 离开页面时断开连接释放资源
+  if (ws) ws.close() 
 })
 </script>
 

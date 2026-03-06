@@ -1,7 +1,7 @@
 {
     "rtsp_url": "rtsp://14.18.91.10:10554/rtp/34020000001110100701_34020000001311001701",
     "current_zone": "澳门银行",
-    "auto_interval_minutes": 1,
+    "auto_interval_minutes": 30,
     "floors": [
         "1",
         "2",
