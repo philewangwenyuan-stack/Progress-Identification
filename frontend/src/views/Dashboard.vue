@@ -9,10 +9,6 @@
           <h1 class="sys-title">中建四局进度自动识别算法</h1>
         </div>
         <div class="header-right">
-          <el-button type="warning" plain size="large" @click="planImportVisible = true">
-            <el-icon><UploadFilled /></el-icon> 导入进度计划
-          </el-button>
-
           <el-button type="danger" plain size="large" @click="confirmReset">
             <el-icon><Delete /></el-icon> 重置系统
           </el-button>
@@ -21,7 +17,7 @@
             <el-icon><Edit /></el-icon> 手动修正进度
           </el-button>
           <el-button type="primary" plain size="large" @click="settingVisible = true">
-            <el-icon><Setting /></el-icon> 系统配置
+            <el-icon><Setting /></el-icon> 系统配置与计划导入
           </el-button>
         </div>
       </header>
@@ -152,117 +148,111 @@
 
     </div>
 
-    <el-dialog v-model="settingVisible" title="⚙️ 监控舱系统配置" width="500px">
-      <el-form :model="configForm" label-position="top">
-        <el-form-item label="RTSP 视频流地址">
-          <el-input v-model="configForm.rtsp_url"></el-input>
-        </el-form-item>
-        <el-form-item label="当前绑定的施工区域">
-          <el-input v-model="configForm.current_zone"></el-input>
-        </el-form-item>
-        <el-form-item label="自动抓拍间隔 (分钟, 0为关闭)">
-          <el-input-number v-model="configForm.auto_interval_minutes" :min="0" style="width: 100%"></el-input-number>
-        </el-form-item>
-        <el-form-item label="全局楼层序列 (英文逗号分隔)">
-          <el-input v-model="configForm.floors_str" type="textarea" :rows="3"></el-input>
-          <div class="help-text">用于计算总进度百分比，例如: B2,B1,1,2,3,4,5,屋面层</div>
-        </el-form-item>
-      </el-form>
+    <el-dialog v-model="settingVisible" title="⚙️ 系统综合配置与进度计划管理" width="950px" top="5vh">
+      <el-tabs type="border-card">
+        <el-tab-pane label="🔧 监控舱基础配置">
+          <el-form :model="configForm" label-position="top">
+            <el-row :gutter="20">
+              <el-col :span="12">
+                <el-form-item label="RTSP 视频流地址">
+                  <el-input v-model="configForm.rtsp_url"></el-input>
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="当前绑定的施工区域">
+                  <el-input v-model="configForm.current_zone"></el-input>
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-row :gutter="20">
+              <el-col :span="12">
+                <el-form-item label="自动抓拍间隔 (分钟, 0为关闭)">
+                  <el-input-number v-model="configForm.auto_interval_minutes" :min="0" style="width: 100%"></el-input-number>
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="全局楼层序列 (用于总进度计算)">
+                  <el-input v-model="configForm.floors_str" placeholder="如: B2,B1,1,2,3,4"></el-input>
+                </el-form-item>
+              </el-col>
+            </el-row>
+          </el-form>
+        </el-tab-pane>
+
+        <el-tab-pane label="📅 进度计划 (AI导入 / 手动修正)">
+          <div style="margin-bottom: 20px;">
+            <el-upload
+              drag
+              :action="`${apiBase}/plan/upload`"
+              :show-file-list="false"
+              accept=".xlsx, .xls, .pdf"
+              :before-upload="() => isParsing = true"
+              :on-success="handlePlanParsed"
+              :on-error="handlePlanError"
+            >
+              <el-icon class="el-icon--upload"><upload-filled /></el-icon>
+              <div class="el-upload__text">
+                将进度计划文件拖到此处进行 <b>大模型自动解析</b>，或 <em>点击上传</em>
+              </div>
+            </el-upload>
+          </div>
+
+          <div v-if="isParsing" style="text-align: center; padding: 20px;">
+            <el-icon class="is-loading" :size="30"><Loading /></el-icon>
+            <p style="color: #409EFF; font-weight: bold; margin-top: 10px;">🤖 大模型正在进行语义解析与结构化提取，请稍候...</p>
+          </div>
+
+          <div v-show="!isParsing">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+              <span style="font-weight: bold; color: #67C23A;">
+                已提取 {{ parsedPlanList.length }} 条计划，可直接在下方表格中修改：
+              </span>
+              <el-button type="success" plain size="small" @click="addNewPlanRow">
+                <el-icon><Plus /></el-icon> 手动新增一行
+              </el-button>
+            </div>
+            
+            <el-table :data="parsedPlanList" border stripe height="320" size="small">
+              <el-table-column label="施工楼层" width="100" align="center">
+                <template #default="scope">
+                  <el-input v-model="scope.row.floor" placeholder="如: 1" />
+                </template>
+              </el-table-column>
+              <el-table-column label="区域" width="120">
+                <template #default="scope">
+                  <el-input v-model="scope.row.zone_name" placeholder="区域名称" />
+                </template>
+              </el-table-column>
+              <el-table-column label="工序" width="130">
+                <template #default="scope">
+                  <el-input v-model="scope.row.stage" placeholder="如: 模板阶段" />
+                </template>
+              </el-table-column>
+              <el-table-column label="计划开始时间" min-width="140">
+                <template #default="scope">
+                  <el-input v-model="scope.row.planned_start" placeholder="YYYY-MM-DD" />
+                </template>
+              </el-table-column>
+              <el-table-column label="计划结束时间" min-width="140">
+                <template #default="scope">
+                  <el-input v-model="scope.row.planned_end" placeholder="YYYY-MM-DD" />
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="70" align="center" fixed="right">
+                <template #default="scope">
+                  <el-button type="danger" icon="Delete" circle size="small" @click="removePlanRow(scope.$index)" />
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+        </el-tab-pane>
+      </el-tabs>
+
       <template #footer>
         <el-button @click="settingVisible = false">取消</el-button>
-        <el-button type="primary" @click="saveConfig">保存配置</el-button>
+        <el-button type="primary" @click="saveAllConfigurations">保存全部配置与计划</el-button>
       </template>
     </el-dialog>
-
-    <el-dialog v-model="manualFixVisible" title="🔧 手动进度修正" width="400px">
-      <el-form :model="manualForm" label-width="80px">
-        <el-form-item label="施工区域">
-          <el-select v-model="manualForm.zone_name" style="width: 100%">
-            <el-option v-for="zone in manualFormZoneOptions" :key="zone" :label="zone" :value="zone" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="目标楼层">
-          <el-select v-model="manualForm.target_floor" style="width: 100%">
-            <el-option v-for="floor in config.floors" :key="floor" :label="floor + '层'" :value="floor" />
-          </el-select>
-        </el-form-item>  
-        <el-form-item label="目标工序">
-          <el-select v-model="manualForm.target_stage" style="width: 100%">
-            <el-option label="模板阶段" value="模板阶段" />
-            <el-option label="钢筋阶段" value="钢筋阶段" />
-            <el-option label="混凝土阶段" value="混凝土阶段" />
-          </el-select>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="manualFixVisible = false">取消</el-button>
-        <el-button type="primary" @click="submitManualFix">确认修正</el-button>
-      </template>
-    </el-dialog>
-
-    <el-dialog 
-      v-model="detailsVisible" 
-      title="📋 工序阶段与人员抓拍台账" 
-      width="680px" 
-      append-to-body
-      destroy-on-close
-      style="z-index: 9999 !important;"
-    >
-      <div v-if="currentDetails" class="details-panel">
-        
-        <div style="margin-bottom: 15px; padding: 12px; background: #f0f9eb; border-radius: 6px; border: 1px solid #e1f3d8;">
-          <div style="margin-bottom: 10px; font-weight: bold; color: #67C23A; font-size: 15px;">🕒 统计规则自定义 (实时生效)</div>
-          <div style="display: flex; align-items: center; gap: 15px;">
-            <span style="font-size: 14px; color: #606266;">每日有效作业时段：</span>
-            <el-time-picker
-              v-model="dailyTimeRange"
-              is-range
-              range-separator="至"
-              start-placeholder="开始时间"
-              end-placeholder="结束时间"
-              value-format="HH:mm:ss"
-              style="width: 240px;"
-              @change="refreshDetails"
-            />
-          </div>
-          <div style="margin-top: 10px;">
-            <el-checkbox v-model="ignoreStageTime" @change="refreshDetails">
-              强制放宽到整天计算 (忽略工序严格的起止时间，解决早期抓拍漏算问题)
-            </el-checkbox>
-          </div>
-        </div>
-        <div class="summary-box">
-          <p><b>施工阶段：</b> <el-tag>{{ currentDetails?.stage || '未知' }}</el-tag> ({{ currentDetails?.floor || '-' }}F)</p>
-          <p><b>起止时间：</b> {{ currentDetails?.start_time || '-' }} 至 {{ currentDetails?.end_time || '进行中 (至今)' }}</p>
-        
-          <p><b>视觉抓拍总次数：</b> <b>{{ currentDetails?.count || 0 }}</b> 次</p>
-          <p>
-            <b>日均作业人数：</b> 
-            <span style="color: #409EFF; font-weight: bold; font-size: 18px;">{{ currentDetails?.avg_workers || 0 }}</span> 人/天
-            &nbsp;&nbsp;|&nbsp;&nbsp;
-            <b>累计投入人天：</b> 
-            <span style="color: #67C23A; font-weight: bold; font-size: 18px;">{{ currentDetails?.total_man_days || 0 }}</span> 人·天
-          </p>
-        </div>
-        
-        <div class="log-history-list">
-          <div v-if="!currentDetails?.logs || currentDetails.logs.length === 0" style="text-align: center; color: #999; margin-top: 20px;">
-            暂无对应的抓拍日志。
-          </div>
-          <div v-else>
-            <div v-for="(log, idx) in currentDetails.logs" :key="idx" class="history-item">
-              <div class="item-header">
-                <span class="time">{{ log['识别时间'] || '未知时间' }}</span>
-                <span class="workers">作业人数: {{ log['人数'] || '未知' }}</span>
-              </div>
-              <div class="item-desc"><b>视觉分析：</b>{{ log['视觉确认描述'] || '无详细描述' }}</div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </el-dialog>
-    
-  <el-dialog v-model="planImportVisible" title="📄 智能进度计划导入 (AI解析)" width="800px">
       <div style="margin-bottom: 20px;">
         <el-upload
           drag
@@ -313,7 +303,7 @@
           确认无误并应用计划
         </el-button>
       </template>
-    </el-dialog>
+
 </div></template>
 
 <script setup>
@@ -322,6 +312,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Setting, Edit, Delete } from '@element-plus/icons-vue'
 import axios from 'axios'
 import { UploadFilled, Loading } from '@element-plus/icons-vue' // 引入图标
+import { Setting, Edit, Delete, UploadFilled, Loading, Plus } from '@element-plus/icons-vue'
 
 const apiBase = 'http://localhost:8000/api'
 
@@ -389,19 +380,6 @@ const removePlanRow = (index) => {
 const handlePlanError = () => {
   isParsing.value = false
   ElMessage.error("文件上传或解析过程中发生网络错误")
-}
-
-// 确认保存计划到数据库
-const confirmSavePlan = async () => {
-  try {
-    // 这里需要你在后端写一个 /api/plan/save 的接口，接收 parsedPlanList 并存入 SQLite 数据库
-    await axios.post(`${apiBase}/plan/save`, { plans: parsedPlanList.value })
-    ElMessage.success("计划已成功应用！系统将自动开启进度比对报警功能。")
-    planImportVisible.value = false
-    parsedPlanList.value = []
-  } catch(e) {
-    ElMessage.error("计划保存失败")
-  }
 }
 
 // 解决 Bug 4: 即使在重置后，下拉框也能保底显示当前配置里的绑定区域
@@ -524,14 +502,36 @@ const fetchConfig = async () => {
   configForm.value = { ...res.data, floors_str: (res.data.floors || []).join(',') }
 }
 
-const saveConfig = async () => {
+// 整合：一键保存基础配置和进度计划
+const saveAllConfigurations = async () => {
   try {
-    const payload = { ...configForm.value, floors: configForm.value.floors_str.split(',').map(s => s.trim()).filter(Boolean) }
-    const res = await axios.post(`${apiBase}/config`, payload)
-    ElMessage.success(res.data.message)
-    settingVisible.value = false
-    fetchConfig()
-  } catch (e) { ElMessage.error("保存失败") }
+    // 1. 处理基础配置：根据输入的字符串或表格反向提取生成全局楼层数组
+    let finalFloors = [];
+    if (configForm.value.floors_str) {
+      finalFloors = configForm.value.floors_str.split(',').map(s => s.trim()).filter(Boolean);
+    } else if (parsedPlanList.value.length > 0) {
+      // 如果没填全局序列，但填了表格，自动从表格去重提取楼层
+      finalFloors = [...new Set(parsedPlanList.value.map(p => p.floor).filter(Boolean))];
+    }
+    
+    const configPayload = { ...configForm.value, floors: finalFloors };
+    await axios.post(`${apiBase}/config`, configPayload);
+
+    // 2. 只有当表格有数据时，才发送进度计划给后端保存
+    if (parsedPlanList.value.length > 0) {
+      await axios.post(`${apiBase}/plan/save`, { plans: parsedPlanList.value });
+    }
+
+    ElMessage.success("系统配置与进度计划已成功保存并应用！");
+    settingVisible.value = false;
+    
+    // 刷新数据展示
+    fetchConfig();
+    fetchProgress();
+  } catch (e) { 
+    ElMessage.error("保存失败，请检查网络或后端接口");
+    console.error(e);
+  }
 }
 
 const fetchProgress = async () => {
