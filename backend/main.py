@@ -345,6 +345,18 @@ def get_timeline_details(zone_name: str, start_time: str, end_time: str = None):
     # 计算该阶段内，每次抓拍画面的平均作业人数
     avg_workers = round(total_workers / count, 1) if count > 0 else 0
 
+    # 【修复新增逻辑】：计算实际经历的天数，以得出投入人天
+    start_t_obj = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+    if end_time:
+        end_t_obj = datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
+    else:
+        end_t_obj = datetime.now()
+        
+    # 计算总秒数换算为天数（不足1天按1天算，避免除0或数值太小）
+    duration_days = max((end_t_obj - start_t_obj).total_seconds() / 86400, 1.0)
+    total_man_days = round(avg_workers * duration_days, 1)
+
     logs.reverse() # 倒序，最新的记录在最上面
     
-    return {"logs": logs, "avg_workers": avg_workers, "count": count}
+    # 将 total_man_days 一并返回给前端
+    return {"logs": logs, "avg_workers": avg_workers, "count": count, "total_man_days": total_man_days}
