@@ -1,4 +1,4 @@
-抓拍<template>
+<template>
   <div class="screen-container">
     
     <div class="dashboard-wrapper" :style="wrapperStyle">
@@ -16,6 +16,7 @@
           <el-button type="primary" plain size="large" @click="manualFixVisible = true">
             <el-icon><Edit /></el-icon> 手动修正进度
           </el-button>
+          
           <el-button type="primary" plain size="large" @click="settingVisible = true">
             <el-icon><Setting /></el-icon> 系统配置与计划导入
           </el-button>
@@ -145,8 +146,93 @@
           </el-col>
         </el-row>
       </main>
-
     </div>
+
+    <el-dialog v-model="manualFixVisible" title="🔧 手动进度修正" width="400px">
+      <el-form :model="manualForm" label-width="80px">
+        <el-form-item label="施工区域">
+          <el-select v-model="manualForm.zone_name" style="width: 100%">
+            <el-option v-for="zone in manualFormZoneOptions" :key="zone" :label="zone" :value="zone" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="目标楼层">
+          <el-select v-model="manualForm.target_floor" style="width: 100%">
+            <el-option v-for="floor in config.floors" :key="floor" :label="floor + '层'" :value="floor" />
+          </el-select>
+        </el-form-item>  
+        <el-form-item label="目标工序">
+          <el-select v-model="manualForm.target_stage" style="width: 100%">
+            <el-option label="模板阶段" value="模板阶段" />
+            <el-option label="钢筋阶段" value="钢筋阶段" />
+            <el-option label="混凝土阶段" value="混凝土阶段" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="manualFixVisible = false">取消</el-button>
+        <el-button type="primary" @click="submitManualFix">确认修正</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog 
+      v-model="detailsVisible" 
+      title="📋 工序阶段与人员抓拍台账" 
+      width="680px" 
+      append-to-body
+      destroy-on-close
+      style="z-index: 9999 !important;"
+    >
+      <div v-if="currentDetails" class="details-panel">
+        <div style="margin-bottom: 15px; padding: 12px; background: #f0f9eb; border-radius: 6px; border: 1px solid #e1f3d8;">
+          <div style="margin-bottom: 10px; font-weight: bold; color: #67C23A; font-size: 15px;">🕒 统计规则自定义 (实时生效)</div>
+          <div style="display: flex; align-items: center; gap: 15px;">
+            <span style="font-size: 14px; color: #606266;">每日有效作业时段：</span>
+            <el-time-picker
+              v-model="dailyTimeRange"
+              is-range
+              range-separator="至"
+              start-placeholder="开始时间"
+              end-placeholder="结束时间"
+              value-format="HH:mm:ss"
+              style="width: 240px;"
+              @change="refreshDetails"
+            />
+          </div>
+          <div style="margin-top: 10px;">
+            <el-checkbox v-model="ignoreStageTime" @change="refreshDetails">
+              强制放宽到整天计算 (忽略工序严格的起止时间，解决早期抓拍漏算问题)
+            </el-checkbox>
+          </div>
+        </div>
+        <div class="summary-box">
+          <p><b>施工阶段：</b> <el-tag>{{ currentDetails?.stage || '未知' }}</el-tag> ({{ currentDetails?.floor || '-' }}F)</p>
+          <p><b>起止时间：</b> {{ currentDetails?.start_time || '-' }} 至 {{ currentDetails?.end_time || '进行中 (至今)' }}</p>
+          <p><b>视觉抓拍总次数：</b> <b>{{ currentDetails?.count || 0 }}</b> 次</p>
+          <p>
+            <b>日均作业人数：</b> 
+            <span style="color: #409EFF; font-weight: bold; font-size: 18px;">{{ currentDetails?.avg_workers || 0 }}</span> 人/天
+            &nbsp;&nbsp;|&nbsp;&nbsp;
+            <b>累计投入人天：</b> 
+            <span style="color: #67C23A; font-weight: bold; font-size: 18px;">{{ currentDetails?.total_man_days || 0 }}</span> 人·天
+          </p>
+        </div>
+        
+        <div class="log-history-list">
+          <div v-if="!currentDetails?.logs || currentDetails.logs.length === 0" style="text-align: center; color: #999; margin-top: 20px;">
+            暂无对应的抓拍日志。
+          </div>
+          <div v-else>
+            <div v-for="(log, idx) in currentDetails.logs" :key="idx" class="history-item">
+              <div class="item-header">
+                <span class="time">{{ log['识别时间'] || '未知时间' }}</span>
+                <span class="workers">作业人数: {{ log['人数'] || '未知' }}</span>
+              </div>
+              <div class="item-desc"><b>视觉分析：</b>{{ log['视觉确认描述'] || '无详细描述' }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </el-dialog>
 
     <el-dialog v-model="settingVisible" title="⚙️ 系统综合配置与进度计划管理" width="950px" top="5vh">
       <el-tabs type="border-card">
@@ -218,16 +304,7 @@
                   <el-input v-model="scope.row.floor" placeholder="如: 1" />
                 </template>
               </el-table-column>
-              <el-table-column label="区域" width="120">
-                <template #default="scope">
-                  <el-input v-model="scope.row.zone_name" placeholder="区域名称" />
-                </template>
-              </el-table-column>
-              <el-table-column label="工序" width="130">
-                <template #default="scope">
-                  <el-input v-model="scope.row.stage" placeholder="如: 模板阶段" />
-                </template>
-              </el-table-column>
+              
               <el-table-column label="计划开始时间" min-width="140">
                 <template #default="scope">
                   <el-input v-model="scope.row.planned_start" placeholder="YYYY-MM-DD" />
@@ -240,7 +317,9 @@
               </el-table-column>
               <el-table-column label="操作" width="70" align="center" fixed="right">
                 <template #default="scope">
-                  <el-button type="danger" icon="Delete" circle size="small" @click="removePlanRow(scope.$index)" />
+                  <el-button type="danger" circle size="small" @click="removePlanRow(scope.$index)">
+                    <el-icon><Delete /></el-icon>
+                  </el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -253,126 +332,63 @@
         <el-button type="primary" @click="saveAllConfigurations">保存全部配置与计划</el-button>
       </template>
     </el-dialog>
-      <div style="margin-bottom: 20px;">
-        <el-upload
-          drag
-          :action="`${apiBase}/plan/upload`"
-          :show-file-list="false"
-          accept=".xlsx, .xls, .pdf"
-          :before-upload="() => isParsing = true"
-          :on-success="handlePlanParsed"
-          :on-error="handlePlanError"
-        >
-          <el-icon class="el-icon--upload"><upload-filled /></el-icon>
-          <div class="el-upload__text">
-            将进度计划 (Excel/PDF) 拖到此处，或 <em>点击上传</em>
-          </div>
-          <template #tip>
-            <div class="el-upload__tip">
-              大模型将自动读取文件内容，并智能提取楼层、工序与计划起止时间
-            </div>
-          </template>
-        </el-upload>
-      </div>
 
-      <div v-if="isParsing" style="text-align: center; padding: 20px;">
-        <el-icon class="is-loading" :size="30"><Loading /></el-icon>
-        <p style="color: #409EFF; font-weight: bold; margin-top: 10px;">🤖 大模型正在进行语义解析与结构化提取，请稍候...</p>
-      </div>
-
-      <div v-if="parsedPlanList.length > 0 && !isParsing">
-        <div style="margin-bottom: 10px; font-weight: bold; color: #67C23A;">
-          ✅ 解析成功！共提取出 {{ parsedPlanList.length }} 条计划任务，请核对：
-        </div>
-        <el-table :data="parsedPlanList" border stripe height="300" size="small">
-          <el-table-column prop="zone_name" label="区域" width="120"></el-table-column>
-          <el-table-column prop="floor" label="楼层" width="80"></el-table-column>
-          <el-table-column prop="stage" label="工序" width="100">
-            <template #default="scope">
-              <el-tag size="small">{{ scope.row.stage }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="planned_start" label="计划开始时间"></el-table-column>
-          <el-table-column prop="planned_end" label="计划结束时间"></el-table-column>
-        </el-table>
-      </div>
-
-      <template #footer>
-        <el-button @click="planImportVisible = false">取消</el-button>
-        <el-button type="primary" :disabled="parsedPlanList.length === 0" @click="confirmSavePlan">
-          确认无误并应用计划
-        </el-button>
-      </template>
-
-</div></template>
+  </div>
+</template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Setting, Edit, Delete } from '@element-plus/icons-vue'
 import axios from 'axios'
-import { UploadFilled, Loading } from '@element-plus/icons-vue' // 引入图标
 import { Setting, Edit, Delete, UploadFilled, Loading, Plus } from '@element-plus/icons-vue'
 
 const apiBase = 'http://localhost:8000/api'
 
-const planImportVisible = ref(false)
 const isParsing = ref(false)
 const parsedPlanList = ref([])
 
 const parseFloorNumber = (floorStr) => {
-  if (!floorStr) return 999; // 为空的行排在最底下
+  if (!floorStr) return 999;
   const str = String(floorStr).toUpperCase().trim();
-  
-  // 处理 B1, B2 等地下室写法 -> 转为 -1, -2
   if (str.startsWith('B')) {
     const num = parseInt(str.replace('B', ''));
     return isNaN(num) ? -99 : -num;
   }
-  // 处理 "地下1层", "负1" 等中文写法 -> 转为 -1
   if (str.includes('地下') || str.includes('负')) {
     const num = parseInt(str.replace(/[^0-9]/g, ''));
     return isNaN(num) ? -99 : -num;
   }
-  
-  // 处理正常的纯数字（如 "1", "-2"）
   const num = parseInt(str);
   return isNaN(num) ? 999 : num;
 }
 
-// 核心排序函数：按楼层从小到大（从下到上/负数到正数）排序
 const sortPlanList = () => {
   parsedPlanList.value.sort((a, b) => {
     return parseFloorNumber(a.floor) - parseFloorNumber(b.floor);
   });
 }
 
-// 上传并经由后端大模型解析成功后的回调
 const handlePlanParsed = (response) => {
   isParsing.value = false
   if (response.status === 'success') {
-    // 强制过滤只保留前端需要的字段，防止大模型乱造字段
+    // 过滤掉区域和工序，只保留楼层和时间
     parsedPlanList.value = response.data.map(item => ({
       floor: item.floor || '',
       planned_start: item.planned_start || '',
       planned_end: item.planned_end || ''
     }));
-    
-    // 拿到数据后立刻执行一次自动排序
     sortPlanList(); 
-    
     ElMessage.success(response.message)
   } else {
     ElMessage.error(response.message || "解析失败")
   }
 }
 
-// 纯手动新增一行
 const addNewPlanRow = () => {
+  // 新增行时也不再需要区域和工序字段
   parsedPlanList.value.push({ floor: '', planned_start: '', planned_end: '' });
 }
 
-// 删除某一行
 const removePlanRow = (index) => {
   parsedPlanList.value.splice(index, 1);
 }
@@ -382,7 +398,32 @@ const handlePlanError = () => {
   ElMessage.error("文件上传或解析过程中发生网络错误")
 }
 
-// 解决 Bug 4: 即使在重置后，下拉框也能保底显示当前配置里的绑定区域
+const saveAllConfigurations = async () => {
+  try {
+    let finalFloors = [];
+    if (configForm.value.floors_str) {
+      finalFloors = configForm.value.floors_str.split(',').map(s => s.trim()).filter(Boolean);
+    } else if (parsedPlanList.value.length > 0) {
+      finalFloors = [...new Set(parsedPlanList.value.map(p => p.floor).filter(Boolean))];
+    }
+    
+    const configPayload = { ...configForm.value, floors: finalFloors };
+    await axios.post(`${apiBase}/config`, configPayload);
+
+    if (parsedPlanList.value.length > 0) {
+      await axios.post(`${apiBase}/plan/save`, { plans: parsedPlanList.value });
+    }
+
+    ElMessage.success("系统配置与进度计划已成功保存并应用！");
+    settingVisible.value = false;
+    
+    fetchConfig();
+    fetchProgress();
+  } catch (e) { 
+    ElMessage.error("保存失败，请检查网络或后端接口");
+  }
+}
+
 const manualFormZoneOptions = computed(() => {
   const zones = progressData.value.map(p => p.zone_name)
   if (config.value.current_zone && !zones.includes(config.value.current_zone)) {
@@ -391,26 +432,22 @@ const manualFormZoneOptions = computed(() => {
   return zones
 })
 
-// 需求 2: 弹窗展示状态
 const detailsVisible = ref(false)
 const currentDetails = ref(null)
+const dailyTimeRange = ref(['05:00:00', '22:00:00'])
+const ignoreStageTime = ref(true)
+const currentActiveRow = ref(null)
 
-const dailyTimeRange = ref(['05:00:00', '22:00:00']) // 默认早上5点到晚上10点
-const ignoreStageTime = ref(true) // 默认开启放宽，彻底解决你的 0 记录问题
-const currentActiveRow = ref(null) // 记录当前正在看的行，方便动态刷新
-
-// 点击表格行时触发
 const showTimelineDetails = async (row) => {
   if (!row || !row.start_time) {
     ElMessage.warning("该行数据异常，缺少时间节点！");
     return;
   }
-  currentActiveRow.value = row; // 记住当前点击的行
-  await refreshDetails();       // 调用刷新函数去后端拉数据
-  detailsVisible.value = true;  // 打开弹窗
+  currentActiveRow.value = row;
+  await refreshDetails();
+  detailsVisible.value = true;
 }
 
-// 根据面板设定的条件，向后端拉取最新的台账
 const refreshDetails = async () => {
   const row = currentActiveRow.value;
   if (!row) return;
@@ -422,22 +459,17 @@ const refreshDetails = async () => {
         zone_name: selectedZone.value, 
         start_time: row.start_time, 
         end_time: endTimeParam,
-        // 把时间选择器的值传给后端
         work_start: dailyTimeRange.value ? dailyTimeRange.value[0] : '00:00:00',
         work_end: dailyTimeRange.value ? dailyTimeRange.value[1] : '23:59:59',
         ignore_stage_time: ignoreStageTime.value
       }
     });
-    
-    // 把后端返回的最新计算结果合并到当前详情里
     currentDetails.value = { ...row, ...res.data };
   } catch(e) { 
-    console.error("台账详情请求失败:", e);
     ElMessage.error("获取详情失败，请检查控制台");
   }
 }
 
-// 解决 Bug 3: 刷新后获取最新大模型日志
 const fetchLatestLog = async () => {
   try {
     const res = await axios.get(`${apiBase}/logs/latest`)
@@ -448,30 +480,24 @@ const fetchLatestLog = async () => {
   } catch (e) {}
 }
 
-// ==== 核心：硬核物理绝对居中计算引擎 ====
 const scale = ref(1)
 const offsetX = ref(0)
 const offsetY = ref(0)
 
 const updateScale = () => {
-  // 获取当前浏览器可视区域真实的宽和高
   const ww = window.innerWidth
   const wh = window.innerHeight
-  // 基于 1920x1080 计算出可以完整塞入屏幕的极限缩放比例
   const s = Math.min(ww / 1920, wh / 1080)
   scale.value = s
-  // 精确计算物理居中所需的 Left 和 Top 偏移量
   offsetX.value = (ww - 1920 * s) / 2
   offsetY.value = (wh - 1080 * s) / 2
 }
 
-// 通过绝对定位彻底绑定画布位置
 const wrapperStyle = computed(() => ({
   transform: `scale(${scale.value})`,
   left: `${offsetX.value}px`,
   top: `${offsetY.value}px`
 }))
-// ==================================
 
 const config = ref({ floors: [] })
 const progressData = ref([])
@@ -500,38 +526,6 @@ const fetchConfig = async () => {
   const res = await axios.get(`${apiBase}/config`)
   config.value = res.data
   configForm.value = { ...res.data, floors_str: (res.data.floors || []).join(',') }
-}
-
-// 整合：一键保存基础配置和进度计划
-const saveAllConfigurations = async () => {
-  try {
-    // 1. 处理基础配置：根据输入的字符串或表格反向提取生成全局楼层数组
-    let finalFloors = [];
-    if (configForm.value.floors_str) {
-      finalFloors = configForm.value.floors_str.split(',').map(s => s.trim()).filter(Boolean);
-    } else if (parsedPlanList.value.length > 0) {
-      // 如果没填全局序列，但填了表格，自动从表格去重提取楼层
-      finalFloors = [...new Set(parsedPlanList.value.map(p => p.floor).filter(Boolean))];
-    }
-    
-    const configPayload = { ...configForm.value, floors: finalFloors };
-    await axios.post(`${apiBase}/config`, configPayload);
-
-    // 2. 只有当表格有数据时，才发送进度计划给后端保存
-    if (parsedPlanList.value.length > 0) {
-      await axios.post(`${apiBase}/plan/save`, { plans: parsedPlanList.value });
-    }
-
-    ElMessage.success("系统配置与进度计划已成功保存并应用！");
-    settingVisible.value = false;
-    
-    // 刷新数据展示
-    fetchConfig();
-    fetchProgress();
-  } catch (e) { 
-    ElMessage.error("保存失败，请检查网络或后端接口");
-    console.error(e);
-  }
 }
 
 const fetchProgress = async () => {
@@ -581,7 +575,6 @@ const triggerManualCapture = async () => {
     const res = await axios.post(`${apiBase}/capture/manual`)
     addLog(`识别完成: ${res.data.message}`, "success")
     llmRawResult.value = res.data.llm_result 
-    
     ElMessage.success("智能识别完成")
     snapshotUrl.value = `${apiBase}/snapshot/latest?t=${new Date().getTime()}`
     fetchProgress()
@@ -620,7 +613,7 @@ const confirmReset = () => {
       llmRawResult.value = null
       snapshotUrl.value = ''
     } catch (e) { ElMessage.error("重置失败") }
-  }).catch(() => { /* 用户取消，无需操作 */ })
+  }).catch(() => {})
 }
 
 const getStageTagType = (stage) => {
@@ -629,29 +622,25 @@ const getStageTagType = (stage) => {
   return 'info';
 }
 
-let ws = null // 声明 WebSocket 实例
+let ws = null 
 
 const connectWebSocket = () => {
-  // 动态拼装 WS 地址 (将 http://xxx/api 转换为 ws://xxx/api/ws)
   const wsUrl = apiBase.replace(/^http/, 'ws') + '/ws'
   ws = new WebSocket(wsUrl)
   
   ws.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data)
-      // 一旦监听到后端推送的 'update' 事件，说明数据变了，立即刷新画面和图表
       if (data.event === 'update') {
         fetchProgress()
         if (selectedZone.value) fetchTimeline()
         fetchLatestLog() 
-        // 加上时间戳刷新图片，拿到刚刚抓拍到的最新画面
         snapshotUrl.value = `${apiBase}/snapshot/latest?t=${new Date().getTime()}`
       }
     } catch(e) {}
   }
 
   ws.onclose = () => {
-    // 意外断线时，每 5 秒自动重连，保证看板长期在线
     setTimeout(connectWebSocket, 5000)
   }
 }
@@ -659,121 +648,52 @@ const connectWebSocket = () => {
 onMounted(() => {
   updateScale()
   window.addEventListener('resize', updateScale)
-
   fetchConfig()
   fetchProgress()
   fetchLatestLog() 
   snapshotUrl.value = `${apiBase}/snapshot/latest?t=${new Date().getTime()}`
   addLog("系统初始化成功，大模型引擎就绪。", "info")
-  
-  // 启动基于事件驱动的 WebSocket 监听，彻底告别定时器
   connectWebSocket()
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', updateScale)
-  // 离开页面时断开连接释放资源
   if (ws) ws.close() 
 })
 </script>
 
 <style scoped>
-/* ========================================================= */
-/* 大屏缩放底层容器：强行霸占视口，无视浏览器的margin */
-/* ========================================================= */
-.screen-container {
-  position: fixed; /* 使用 fixed 定位，一劳永逸干掉滚动条和留白 */
-  top: 0;
-  left: 0;
-  width: 100vw;
-  height: 100vh;
-  background-color: #1a1a1a;
-  overflow: hidden; 
-  z-index: 1;
-}
-
-/* 核心画布：死死钉死在 1920 x 1080 像素！ */
-.dashboard-wrapper {
-  position: absolute; /* 使用绝对定位，不依靠 Flex 的居中 */
-  width: 1920px;
-  height: 1080px;
-  background-color: #f2f5f8;
-  display: flex;
-  flex-direction: column;
-  box-shadow: 0 0 50px rgba(0,0,0,0.8);
-  font-family: "Helvetica Neue", Helvetica, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Arial, sans-serif;
-  transform-origin: 0 0 !important; /* 极其重要：把缩放原点钉在左上角(0,0)位置 */
-}
-/* ========================================================= */
-
-.cscec-header {
-  height: 80px;
-  background-color: #004b87;
-  color: #fff;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 0 30px;
-  flex-shrink: 0;
-}
+.screen-container { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background-color: #1a1a1a; overflow: hidden; z-index: 1; }
+.dashboard-wrapper { position: absolute; width: 1920px; height: 1080px; background-color: #f2f5f8; display: flex; flex-direction: column; box-shadow: 0 0 50px rgba(0,0,0,0.8); font-family: "Helvetica Neue", Helvetica, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Arial, sans-serif; transform-origin: 0 0 !important; }
+.cscec-header { height: 80px; background-color: #004b87; color: #fff; display: flex; justify-content: space-between; align-items: center; padding: 0 30px; flex-shrink: 0; }
 .header-left, .header-right { display: flex; align-items: center; gap: 20px; }
 .sys-title { font-size: 24px; font-weight: 500; margin: 0; letter-spacing: 2px; }
-
-/* 新增图片 logo 的样式 */
-.cscec-logo-img {
-  height: 46px; /* 控制图片的高度，你可以根据实际图片的比例适当调大或调小 */
-  object-fit: contain; /* 保证图片等比例缩放不拉伸 */
-  margin-right: 15px; /* 让图标和右侧的“中建四局...”标题保持一定间距 */
-  
-  /* 如果你的 logo 图片本身带有白色底色，可以忽略下面两行 */
-  /* 如果是纯透明 logo，且在深蓝色背景下看不清，可以取消下面两行的注释给它加个白底 */
-  /* background-color: #fff; */
-  /* padding: 4px 10px; border-radius: 6px; */
-}
-
-
-.main-content {
-  height: calc(1080px - 80px); 
-  padding: 20px;
-  box-sizing: border-box;
-}
+.cscec-logo-img { height: 46px; object-fit: contain; margin-right: 15px; }
+.main-content { height: calc(1080px - 80px); padding: 20px; box-sizing: border-box; }
 .full-height { height: 100%; margin: 0 !important; }
 .col-flex { display: flex; flex-direction: column; height: 100%; gap: 20px; padding: 0 10px !important;}
 .flex-item { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .flex-item-fixed { flex-shrink: 0; }
-
 :deep(.el-card) { border-radius: 8px; border: none; box-shadow: 0 2px 12px rgba(0,0,0,0.05); }
 :deep(.el-card__header) { padding: 15px 20px; background-color: #fff; border-bottom: 1px solid #ebeef5; }
 .card-header { display: flex; justify-content: space-between; align-items: center; }
 .card-title { font-size: 18px; font-weight: bold; color: #303133; }
-
 .video-wrapper { flex: 1; background: #eaedf1; border-radius: 6px; overflow: hidden; position: relative; margin-bottom: 15px; }
 .snapshot-img { position: absolute; width: 100%; height: 100%; top: 0; left: 0; }
 .action-bar { text-align: center; flex-shrink: 0; }
 .analyze-btn { width: 100%; font-size: 18px; height: 50px; font-weight: bold; letter-spacing: 2px; }
-
 .log-card { height: 320px; }
-.light-terminal {
-  height: 220px;
-  background: #f8f9fa; border: 1px solid #e4e7ed; border-radius: 6px;
-  padding: 12px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 14px; line-height: 1.6;
-}
+.light-terminal { height: 220px; background: #f8f9fa; border: 1px solid #e4e7ed; border-radius: 6px; padding: 12px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 14px; line-height: 1.6; }
 .log-text { color: #606266; margin-bottom: 4px; }
 .log-time { color: #909399; }
 .log-text.info { color: #303133; }
 .log-text.success { color: #67c23a; }
 .log-text.warning { color: #e6a23c; }
 .log-text.error { color: #f56c6c; }
-
 .json-result-box { height: 220px; display: flex; flex-direction: column; }
 .json-title { font-size: 14px; color: #909399; margin-bottom: 6px; font-weight: bold;}
-.json-content {
-  flex: 1; margin: 0; padding: 12px; background: #eff2f6; border-radius: 6px;
-  font-family: 'Consolas', monospace; font-size: 14px; color: #004b87;
-  overflow: auto; border: 1px dashed #dcdfe6; line-height: 1.5;
-}
+.json-content { flex: 1; margin: 0; padding: 12px; background: #eff2f6; border-radius: 6px; font-family: 'Consolas', monospace; font-size: 14px; color: #004b87; overflow: auto; border: 1px dashed #dcdfe6; line-height: 1.5; }
 .json-empty { flex: 1; display: flex; align-items: center; justify-content: center; color: #c0c4cc; font-size: 14px; background: #fafafa; border-radius: 6px; border: 1px dashed #e4e7ed;}
-
 .progress-list { padding: 10px; max-height: 200px; overflow-y: auto;}
 .progress-item { margin-bottom: 15px; }
 .progress-item:last-child { margin-bottom: 0; }
@@ -781,16 +701,13 @@ onUnmounted(() => {
 .p-zone { color: #606266; font-weight: bold; }
 .p-floor { color: #303133; }
 .p-floor b { color: #004b87; font-size: 20px; }
-
 .custom-table { width: 100%; font-size: 15px; }
 .floor-text { font-weight: bold; color: #004b87; font-size: 16px; }
 .time-ended { color: #606266; }
 .time-active { color: #e6a23c; font-weight: bold; }
-
 .blinking { animation: blinker 1.5s linear infinite; }
 @keyframes blinker { 50% { opacity: 0.4; } }
 .help-text { font-size: 13px; color: #909399; margin-top: 6px; }
-
 .summary-box { background: #f4f4f5; padding: 15px; border-radius: 6px; font-size: 15px; color: #333; line-height: 1.8;}
 .summary-box p { margin: 5px 0; }
 .log-history-list { max-height: 350px; overflow-y: auto; padding-right: 10px; }
@@ -798,6 +715,4 @@ onUnmounted(() => {
 .item-header { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 14px; font-weight: bold; color: #606266;}
 .item-header .time { color: #909399; font-weight: normal;}
 .item-desc { font-size: 14px; color: #303133; line-height: 1.5;}
-
-
 </style>
