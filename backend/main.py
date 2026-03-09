@@ -17,7 +17,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 import pandas as pd
 import pdfplumber
 from fastapi import UploadFile, File
-
+import io
 # 引入现有的核心组件 
 from config import settings
 from core.llm_parser import ConstructionLLMParser
@@ -164,13 +164,62 @@ def get_progress():
         df = pd.read_sql_query("SELECT zone_name, floor, stage, is_poured FROM zone_states_v2", conn)
         return {"data": df.to_dict(orient="records")}
 
-@app.get("/api/timeline/{zone_name}")
+@app.get("/api/timeline/{zone_name}") #进度对比
 def get_timeline(zone_name: str):
-    """获取单个区域的时间轴"""
+    """获取单个区域的时间轴，并结合导入的进度计划计算滞后状态"""
     if not os.path.exists(settings.DB_FILE_PATH): return {"data": []}
+    
+    # 1. 尝试加载前端之前导入保存的本地进度计划表
+    plan_data = []
+    plan_path = os.path.join(settings.DATA_DIR, "project_plan.json")
+    if os.path.exists(plan_path):
+        try:
+            with open(plan_path, "r", encoding="utf-8") as f:
+                plan_data = json.load(f)
+        except Exception:
+            pass
+
     with sqlite3.connect(settings.DB_FILE_PATH) as conn:
         df = pd.read_sql_query("SELECT floor, stage, start_time, end_time FROM stage_timeline WHERE zone_name = ? ORDER BY id DESC", conn, params=(zone_name,))
-        return {"data": df.to_dict(orient="records")}
+        records = df.to_dict(orient="records")
+        
+        # 2. 对比实际进度与计划进度
+        for row in records:
+            row["status"] = "未排期"  # 默认无计划状态
+            row["planned_start"] = "暂无计划"
+            row["planned_end"] = "暂无计划"
+            
+            # 寻找当前楼层和工序对应的计划
+            for p in plan_data:
+                # 强行转为字符串比对，防止数据库存 int 计划表存 str 导致不匹配
+                if str(p.get("floor", "")) == str(row["floor"]) and p.get("stage", "") == row["stage"]:
+                    row["planned_start"] = p.get("planned_start", "")
+                    row["planned_end"] = p.get("planned_end", "")
+                    row["status"] = "正常" # 匹配上计划后，先暂定正常
+                    
+                    try:
+                        # 滞后计算核心逻辑：
+                        # 如果有计划结束时间，将实际日期与之比对
+                        if row["planned_end"]:
+                            # 解析大模型提取的计划日期 (处理可能出现的斜杠等不规范格式)
+                            clean_plan_end = row["planned_end"].replace("/", "-")
+                            planned_end_dt = datetime.strptime(clean_plan_end, "%Y-%m-%d").date()
+                            
+                            # 如果该工序已实际结束，拿实际结束时间比；如果还在进行中，拿系统当前时间比
+                            if row["end_time"]:
+                                actual_dt = datetime.strptime(row["end_time"], "%Y-%m-%d %H:%M:%S").date()
+                            else:
+                                actual_dt = datetime.now().date()
+                                
+                            # 如果实际时间 超出了 计划结束时间，判定为滞后！
+                            if actual_dt > planned_end_dt:
+                                row["status"] = "滞后"
+                                
+                    except Exception as e:
+                        pass # 如果日期格式大模型解析得乱七八糟，就跳过比对逻辑，不强行报错
+                    break # 找到匹配的计划就跳出循环
+                    
+        return {"data": records}
 
 @app.get("/api/snapshot/latest")
 def get_latest_snapshot():
@@ -371,15 +420,20 @@ async def upload_and_parse_plan(file: UploadFile = File(...)):
     file_ext = file.filename.lower().split('.')[-1]
     
     try:
+        # 【核心修复】：将 FastAPI 的特殊文件对象转换为标准的纯内存字节流
+        file_bytes = await file.read()
+        import io
+        file_stream = io.BytesIO(file_bytes)
+
         if file_ext in ['xlsx', 'xls']:
-            # 读取 Excel
-            df = pd.read_excel(file.file)
+            # 读取 Excel (此时传入的是标准字节流，pandas 不会再报错)
+            df = pd.read_excel(file_stream)
             # 将 Excel 转换为纯文本格式（CSV风格的字符串）喂给大模型
             raw_text = df.to_string()
             
         elif file_ext == 'pdf':
-            # 读取 PDF
-            with pdfplumber.open(file.file) as pdf:
+            # 读取 PDF (同理，pdfplumber 也能完美识别 BytesIO)
+            with pdfplumber.open(file_stream) as pdf:
                 for page in pdf.pages:
                     text = page.extract_text()
                     if text: raw_text += text + "\n"
@@ -400,3 +454,31 @@ async def upload_and_parse_plan(file: UploadFile = File(...)):
         
     except Exception as e:
         return {"status": "error", "message": f"解析异常: {str(e)}"}
+    
+    # ================= 进度计划保存接口 =================
+# 定义前端传过来的单条计划的数据结构
+class PlanItem(BaseModel):
+    floor: str = ""
+    stage: str = "默认工序"
+    planned_start: str = ""
+    planned_end: str = ""
+
+# 定义接收的整体数据结构（一个包含多条计划的列表）
+class PlanSaveRequest(BaseModel):
+    plans: list[PlanItem]
+
+@app.post("/api/plan/save")
+def save_project_plan(req: PlanSaveRequest):
+    """保存前端提交的进度计划表"""
+    try:
+        # 将进度计划保存到 data 目录下的 project_plan.json 文件中
+        plan_path = os.path.join(settings.DATA_DIR, "project_plan.json")
+        
+        # 将 Pydantic 模型转换为字典并写入文件
+        with open(plan_path, "w", encoding="utf-8") as f:
+            json.dump([p.dict() for p in req.plans], f, ensure_ascii=False, indent=4)
+            
+        return {"status": "success", "message": "进度计划已成功保存！"}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"保存计划失败: {str(e)}")

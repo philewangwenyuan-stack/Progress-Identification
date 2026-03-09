@@ -126,21 +126,38 @@
                 border
                 size="default"
                 class="custom-table">
+                
                 <el-table-column prop="floor" label="施工层" width="90" align="center">
                   <template #default="scope"><span class="floor-text">{{ scope.row.floor }}F</span></template>
                 </el-table-column>
+                
                 <el-table-column prop="stage" label="当前工序" width="120" align="center">
                   <template #default="scope">
                     <el-tag :type="getStageTagType(scope.row.stage)" size="default">{{ scope.row.stage }}</el-tag>
                   </template>
                 </el-table-column>
+                
                 <el-table-column prop="start_time" label="开始时间" align="center" min-width="160"></el-table-column>
+                
                 <el-table-column prop="end_time" label="结束时间" align="center" min-width="160">
                   <template #default="scope">
                     <span v-if="scope.row.end_time" class="time-ended">{{ scope.row.end_time }}</span>
                     <span v-else class="time-active">进行中...</span>
                   </template>
                 </el-table-column>
+
+                <el-table-column prop="status" label="状态" width="80" align="center" fixed="right">
+                  <template #default="scope">
+                    <el-tag 
+                      :type="scope.row.status === '滞后' ? 'danger' : (scope.row.status === '正常' ? 'success' : 'info')" 
+                      size="default" 
+                      :effect="scope.row.status === '滞后' ? 'dark' : 'light'"
+                    >
+                      {{ scope.row.status }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                
               </el-table>
             </el-card>
           </el-col>
@@ -183,6 +200,7 @@
       style="z-index: 9999 !important;"
     >
       <div v-if="currentDetails" class="details-panel">
+        
         <div style="margin-bottom: 15px; padding: 12px; background: #f0f9eb; border-radius: 6px; border: 1px solid #e1f3d8;">
           <div style="margin-bottom: 10px; font-weight: bold; color: #67C23A; font-size: 15px;">🕒 统计规则自定义 (实时生效)</div>
           <div style="display: flex; align-items: center; gap: 15px;">
@@ -204,10 +222,36 @@
             </el-checkbox>
           </div>
         </div>
+
         <div class="summary-box">
-          <p><b>施工阶段：</b> <el-tag>{{ currentDetails?.stage || '未知' }}</el-tag> ({{ currentDetails?.floor || '-' }}F)</p>
-          <p><b>起止时间：</b> {{ currentDetails?.start_time || '-' }} 至 {{ currentDetails?.end_time || '进行中 (至今)' }}</p>
-          <p><b>视觉抓拍总次数：</b> <b>{{ currentDetails?.count || 0 }}</b> 次</p>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+             <span><b>施工阶段：</b> <el-tag>{{ currentDetails?.stage || '未知' }}</el-tag> ({{ currentDetails?.floor || '-' }}F)</span>
+             <el-tag :type="currentDetails?.status === '滞后' ? 'danger' : (currentDetails?.status === '正常' ? 'success' : 'info')" effect="dark" round>
+                状态判定：{{ currentDetails?.status || '未知' }}
+             </el-tag>
+          </div>
+          
+          <div style="margin: 10px 0; padding: 12px; background: #fff; border: 1px dashed #dcdfe6; border-radius: 6px;">
+            <div style="margin-bottom: 8px; color: #409EFF; font-weight: bold; font-size: 14px;">
+              <el-icon><Calendar /></el-icon> 进度计划靶向对比
+            </div>
+            <table style="width: 100%; font-size: 14px; border-collapse: collapse;">
+              <tbody>
+                <tr>
+                  <td style="color: #909399; padding: 4px 0; width: 80px;">🎯 计划排期</td>
+                  <td style="color: #303133; font-weight: 500;">{{ currentDetails?.planned_start }} 至 {{ currentDetails?.planned_end }}</td>
+                </tr>
+                <tr>
+                  <td style="color: #909399; padding: 4px 0;">📸 实际追踪</td>
+                  <td :style="{ color: currentDetails?.status === '滞后' ? '#F56C6C' : '#67C23A', fontWeight: 'bold' }">
+                    {{ currentDetails?.start_time || '-' }} 至 {{ currentDetails?.end_time || '进行中 (至今)' }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p style="margin-top: 15px;"><b>视觉抓拍总次数：</b> <b>{{ currentDetails?.count || 0 }}</b> 次</p>
           <p>
             <b>日均作业人数：</b> 
             <span style="color: #409EFF; font-weight: bold; font-size: 18px;">{{ currentDetails?.avg_workers || 0 }}</span> 人/天
@@ -231,6 +275,7 @@
             </div>
           </div>
         </div>
+
       </div>
     </el-dialog>
 
@@ -305,6 +350,12 @@
                 </template>
               </el-table-column>
               
+              <el-table-column label="工序" width="130">
+                <template #default="scope">
+                  <el-input v-model="scope.row.stage" placeholder="如: 模板阶段" />
+                </template>
+              </el-table-column>
+
               <el-table-column label="计划开始时间" min-width="140">
                 <template #default="scope">
                   <el-input v-model="scope.row.planned_start" placeholder="YYYY-MM-DD" />
@@ -340,7 +391,7 @@
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import axios from 'axios'
-import { Setting, Edit, Delete, UploadFilled, Loading, Plus } from '@element-plus/icons-vue'
+import { Setting, Edit, Delete, UploadFilled, Loading, Plus, Calendar } from '@element-plus/icons-vue'
 
 const apiBase = 'http://localhost:8000/api'
 
@@ -368,25 +419,46 @@ const sortPlanList = () => {
   });
 }
 
+// 经由后端大模型解析成功后的回调
 const handlePlanParsed = (response) => {
   isParsing.value = false
+  
+  // 增加一条打印，按 F12 可以在浏览器控制台看到前端到底接到了什么
+  console.log("📦 接收到后端大模型的数据:", response.data);
+
   if (response.status === 'success') {
-    // 过滤掉区域和工序，只保留楼层和时间
+    // 强制映射所有可能出现的字段名，确保滴水不漏
     parsedPlanList.value = response.data.map(item => ({
-      floor: item.floor || '',
-      planned_start: item.planned_start || '',
-      planned_end: item.planned_end || ''
+      zone_name: item.zone_name || configForm.value.current_zone || '默认区域',
+      stage: item.stage || item.工序 || item.施工工序 || '',  // 强力兜底：无论叫什么都能接住
+      floor: item.floor || item.楼层 || '',
+      planned_start: item.planned_start || item.计划开始时间 || '',
+      planned_end: item.planned_end || item.计划结束时间 || ''
     }));
+    
     sortPlanList(); 
-    ElMessage.success(response.message)
+
+    // 自动提取不重复的楼层，并沿用到全局配置表单中
+    const extractedFloors = [...new Set(parsedPlanList.value.map(p => p.floor).filter(Boolean))];
+    if (extractedFloors.length > 0) {
+      configForm.value.floors_str = extractedFloors.join(',');
+    }
+
+    ElMessage.success("解析成功！已自动将提取的进度同步至表格。")
   } else {
-    ElMessage.error(response.message || "解析失败")
+    ElMessage.error(response.message || "大模型解析内容失败，请检查 Excel 格式")
   }
 }
 
+// 纯手动新增一行
 const addNewPlanRow = () => {
-  // 新增行时也不再需要区域和工序字段
-  parsedPlanList.value.push({ floor: '', planned_start: '', planned_end: '' });
+  parsedPlanList.value.push({ 
+    zone_name: configForm.value.current_zone || '默认区域',
+    stage: '', 
+    floor: '', 
+    planned_start: '', 
+    planned_end: '' 
+  });
 }
 
 const removePlanRow = (index) => {

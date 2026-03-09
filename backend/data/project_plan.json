@@ -1,0 +1,38 @@
+[
+    {
+        "floor": "1",
+        "stage": "模板阶段",
+        "planned_start": "2025-12-31",
+        "planned_end": "2026-01-14"
+    },
+    {
+        "floor": "1",
+        "stage": "钢筋阶段",
+        "planned_start": "2026-01-14",
+        "planned_end": "2026-01-18"
+    },
+    {
+        "floor": "1",
+        "stage": "混凝土阶段",
+        "planned_start": "2026-01-18",
+        "planned_end": "2026-01-22"
+    },
+    {
+        "floor": "2",
+        "stage": "模板阶段",
+        "planned_start": "2026-01-22",
+        "planned_end": "2026-01-25"
+    },
+    {
+        "floor": "2",
+        "stage": "钢筋阶段",
+        "planned_start": "2026-01-25",
+        "planned_end": "2026-01-27"
+    },
+    {
+        "floor": "2",
+        "stage": "混凝土阶段",
+        "planned_start": "2026-01-27",
+        "planned_end": "2026-01-29"
+    }
+]

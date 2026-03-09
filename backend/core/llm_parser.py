@@ -73,16 +73,21 @@ class ConstructionLLMParser:
         plan_prompt = """
         你是一个专业的建筑工程项目管理助手。
         我将为你提供一份施工进度计划表的文本（可能来自PDF或Excel提取）。
-        请你从中提取出计划开始和计划结束时间，并严格按照以下 JSON 数组格式返回，不要包含任何额外的解释或Markdown标记：
+        请你从中提取出【楼层】、【计划开始时间】和【计划结束时间】，并严格按照以下 JSON 数组格式返回，不要包含任何额外的解释或Markdown标记：
         [
             {
-                "floor": "楼层",  
-                "planned_start": "2024-05-01", 
-                "planned_end": "2024-05-05"
+                "floor": "这里填提取到的楼层数字或名称，例如 1 或 B1",  
+                "stage": "这里填提取到的施工阶段，例如 模板阶段、钢筋阶段、混凝土阶段等",
+                "planned_start": "YYYY-MM-DD格式", 
+                "planned_end": "YYYY-MM-DD格式"
             }
         ]
         注意：
-        1. 如果某些文本不是具体的任务计划，请忽略它们。
+        1. JSON 的键名必须严格是 floor、planned_start、planned_end，绝对不能用中文键名！
+        2. 如果某些文本不是具体的楼层任务计划，请忽略它们。
+        3. 如果你比较混乱主要提取塔楼部分的计划，其他部分的可以不提取了，专注塔楼就好。
+        4. 如果有多个同样的楼层，把他们合并成一个对象，计划开始时间取最早的，计划结束时间取最晚的。
+        5. 如果遇到1-5层、6-10层这种格式的文本，尝试把它们拆开成多个对象，每个对象对应一个楼层。时间按照平均分配的方式处理。
         """
 
         try:
@@ -100,6 +105,12 @@ class ConstructionLLMParser:
             
             result_str = response.choices[0].message.content
             
+# 👇 --- 新增的强力调试代码：把大模型的原话打印到终端 --- 👇
+            print("\n" + "="*50)
+            print("🤖 大模型针对 Excel 解析的原始返回内容如下：")
+            print(result_str)
+            print("="*50 + "\n")
+            # 👆 -------------------------------------------------------- 👆
             # 【核心修复】：暴力清洗大模型返回的“脏数据”
             # 1. 移除可能存在的 Markdown 代码块标记
             result_str = result_str.replace("```json", "").replace("```", "").strip()
@@ -120,18 +131,33 @@ class ConstructionLLMParser:
             if isinstance(parsed_data, dict):
                 for key in parsed_data:
                     if isinstance(parsed_data[key], list):
-                        return parsed_data[key]
+                        parsed_data = parsed_data[key]
+                        break
+            
+            # 【终极防弹装甲】：强制纠正大模型胡乱生成的中文键名
+            if isinstance(parsed_data, list):
+                cleaned_plan = []
+                for item in parsed_data:
+                    if isinstance(item, dict):
+                        cleaned_item = {
+                            # 如果没有 floor，就去抓取可能叫 '楼层' 或 '施工层' 的字段
+                            "floor": str(item.get("floor", item.get("楼层", item.get("施工层", "")))),
+                            "planned_start": str(item.get("planned_start", item.get("计划开始时间", item.get("开始时间", "")))),
+                            "planned_end": str(item.get("planned_end", item.get("计划结束时间", item.get("结束时间", ""))))
+                        }
+                        # 只要提取到了楼层，就认为是有效数据
+                        if cleaned_item["floor"]:
+                            cleaned_plan.append(cleaned_item)
+                return cleaned_plan
                         
-            return parsed_data if isinstance(parsed_data, list) else []
+            return []
             
         except Exception as e:
             print(f"进度计划解析出错: {e}")
-            # 如果大模型实在解析烂了，打印出它的原文，方便我们在控制台查看到底写了什么鬼东西
             try:
                 print(f"【大模型返回的脏字符串内容为】:\n{result_str[:500]} ...")
             except: pass
             return []
-
 
     def _save_to_local(self, data: dict):
         """将解析结果追加到本地 JSONL 文件中"""
