@@ -258,6 +258,60 @@
       </div>
     </el-dialog>
     
+    <el-dialog v-model="planImportVisible" title="📄 智能进度计划导入 (AI解析)" width="800px">
+      <div style="margin-bottom: 20px;">
+        <el-upload
+          drag
+          :action="`${apiBase}/plan/upload`"
+          :show-file-list="false"
+          accept=".xlsx, .xls, .pdf"
+          :before-upload="() => isParsing = true"
+          :on-success="handlePlanParsed"
+          :on-error="handlePlanError"
+        >
+          <el-icon class="el-icon--upload"><upload-filled /></el-icon>
+          <div class="el-upload__text">
+            将进度计划 (Excel/PDF) 拖到此处，或 <em>点击上传</em>
+          </div>
+          <template #tip>
+            <div class="el-upload__tip">
+              大模型将自动读取文件内容，并智能提取楼层、工序与计划起止时间
+            </div>
+          </template>
+        </el-upload>
+      </div>
+
+      <div v-if="isParsing" style="text-align: center; padding: 20px;">
+        <el-icon class="is-loading" :size="30"><Loading /></el-icon>
+        <p style="color: #409EFF; font-weight: bold; margin-top: 10px;">🤖 大模型正在进行语义解析与结构化提取，请稍候...</p>
+      </div>
+
+      <div v-if="parsedPlanList.length > 0 && !isParsing">
+        <div style="margin-bottom: 10px; font-weight: bold; color: #67C23A;">
+          ✅ 解析成功！共提取出 {{ parsedPlanList.length }} 条计划任务，请核对：
+        </div>
+        <el-table :data="parsedPlanList" border stripe height="300" size="small">
+          <el-table-column prop="zone_name" label="区域" width="120"></el-table-column>
+          <el-table-column prop="floor" label="楼层" width="80"></el-table-column>
+          <el-table-column prop="stage" label="工序" width="100">
+            <template #default="scope">
+              <el-tag size="small">{{ scope.row.stage }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="planned_start" label="计划开始时间"></el-table-column>
+          <el-table-column prop="planned_end" label="计划结束时间"></el-table-column>
+        </el-table>
+      </div>
+
+      <template #footer>
+        <el-button @click="planImportVisible = false">取消</el-button>
+        <el-button type="primary" :disabled="parsedPlanList.length === 0" @click="confirmSavePlan">
+          确认无误并应用计划
+        </el-button>
+      </template>
+    </el-dialog>
+
+
   </div>
 </template>
 
@@ -266,8 +320,42 @@ import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Setting, Edit, Delete } from '@element-plus/icons-vue'
 import axios from 'axios'
+import { UploadFilled, Loading } from '@element-plus/icons-vue' // 引入图标
 
 const apiBase = 'http://localhost:8000/api'
+
+const planImportVisible = ref(false)
+const isParsing = ref(false)
+const parsedPlanList = ref([])
+
+// 上传并经由后端大模型解析成功后的回调
+const handlePlanParsed = (response) => {
+  isParsing.value = false
+  if (response.status === 'success') {
+    parsedPlanList.value = response.data
+    ElMessage.success(response.message)
+  } else {
+    ElMessage.error(response.message || "解析失败")
+  }
+}
+
+const handlePlanError = () => {
+  isParsing.value = false
+  ElMessage.error("文件上传或解析过程中发生网络错误")
+}
+
+// 确认保存计划到数据库
+const confirmSavePlan = async () => {
+  try {
+    // 这里需要你在后端写一个 /api/plan/save 的接口，接收 parsedPlanList 并存入 SQLite 数据库
+    await axios.post(`${apiBase}/plan/save`, { plans: parsedPlanList.value })
+    ElMessage.success("计划已成功应用！系统将自动开启进度比对报警功能。")
+    planImportVisible.value = false
+    parsedPlanList.value = []
+  } catch(e) {
+    ElMessage.error("计划保存失败")
+  }
+}
 
 // 解决 Bug 4: 即使在重置后，下拉框也能保底显示当前配置里的绑定区域
 const manualFormZoneOptions = computed(() => {

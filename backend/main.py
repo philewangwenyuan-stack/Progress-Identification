@@ -14,6 +14,9 @@ from datetime import datetime
 import re
 import asyncio
 from fastapi import WebSocket, WebSocketDisconnect
+import pandas as pd
+import pdfplumber
+from fastapi import UploadFile, File
 
 # 引入现有的核心组件 
 from config import settings
@@ -360,3 +363,40 @@ def get_timeline_details(zone_name: str, start_time: str, end_time: str = None):
     
     # 将 total_man_days 一并返回给前端
     return {"logs": logs, "avg_workers": avg_workers, "count": count, "total_man_days": total_man_days}
+
+@app.post("/api/plan/upload")
+async def upload_and_parse_plan(file: UploadFile = File(...)):
+    """接收前端上传的 Excel 或 PDF，提取文本并交由大模型解析"""
+    raw_text = ""
+    file_ext = file.filename.lower().split('.')[-1]
+    
+    try:
+        if file_ext in ['xlsx', 'xls']:
+            # 读取 Excel
+            df = pd.read_excel(file.file)
+            # 将 Excel 转换为纯文本格式（CSV风格的字符串）喂给大模型
+            raw_text = df.to_string()
+            
+        elif file_ext == 'pdf':
+            # 读取 PDF
+            with pdfplumber.open(file.file) as pdf:
+                for page in pdf.pages:
+                    text = page.extract_text()
+                    if text: raw_text += text + "\n"
+        else:
+            return {"status": "error", "message": "仅支持 .xlsx 或 .pdf 格式"}
+            
+        if not raw_text.strip():
+            return {"status": "error", "message": "未能从文件中提取到有效文本"}
+            
+        # 调用大模型进行结构化解析
+        parsed_plan = parser.parse_project_plan(raw_text)
+        
+        return {
+            "status": "success", 
+            "message": "大模型解析成功，请预览确认", 
+            "data": parsed_plan
+        }
+        
+    except Exception as e:
+        return {"status": "error", "message": f"解析异常: {str(e)}"}
