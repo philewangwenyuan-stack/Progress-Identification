@@ -5,7 +5,7 @@
       
       <header class="cscec-header">
         <div class="header-left">
-          <div class="logo">CSCEC</div>
+          <img src="/cscec-logo.png" alt="CSCEC Logo" class="cscec-logo-img" />
           <h1 class="sys-title">中建四局进度自动识别算法</h1>
         </div>
         <div class="header-right">
@@ -61,9 +61,24 @@
                 </el-col>
                 <el-col :span="12">
                   <div class="json-result-box">
-                    <div class="json-title">JSON 解析结果:</div>
-                    <pre v-if="llmRawResult" class="json-content">{{ JSON.stringify(llmRawResult, null, 2) }}</pre>
-                    <div v-else class="json-empty">等待分析指令...</div>
+                    <div class="json-title">🚀 AI 视觉语义解析报告:</div>
+                    <div v-if="llmRawResult" class="json-content-beautified">
+                      <el-descriptions :column="1" border size="small" class="custom-desc">
+                        <el-descriptions-item label="📍 识别位置">
+                          <el-tag size="default">{{ llmRawResult['位置'] || '未知' }}</el-tag>
+                        </el-descriptions-item>
+                        <el-descriptions-item label="👷 识别估算人数">
+                          <el-tag type="warning" size="default">{{ llmRawResult['人数'] || '未知' }}</el-tag>
+                        </el-descriptions-item>
+                        <el-descriptions-item label="🏗️ 判定当前工序">
+                          <el-tag type="success" size="default" effect="dark">{{ llmRawResult['当前作业工序'] || '未识别' }}</el-tag>
+                        </el-descriptions-item>
+                        <el-descriptions-item label="👁️ 大模型视觉描述">
+                          <span style="color: #606266; line-height: 1.5;">{{ llmRawResult['视觉确认描述'] || '无' }}</span>
+                        </el-descriptions-item>
+                      </el-descriptions>
+                    </div>
+                    <div v-else class="json-empty">等待系统下发分析指令...</div>
                   </div>
                 </el-col>
               </el-row>
@@ -315,7 +330,7 @@ const fetchLatestLog = async () => {
     const res = await axios.get(`${apiBase}/logs/latest`)
     if (res.data.data) {
       llmRawResult.value = res.data.data
-      addLog("已恢复最新一条历史 AI 识别记录", "info")
+      addLog("已识别到一条最新记录", "info")
     }
   } catch (e) {}
 }
@@ -567,8 +582,20 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 .header-left, .header-right { display: flex; align-items: center; gap: 20px; }
-.logo { font-size: 26px; font-weight: 900; background: #fff; color: #004b87; padding: 4px 12px; border-radius: 6px; }
 .sys-title { font-size: 24px; font-weight: 500; margin: 0; letter-spacing: 2px; }
+
+/* 新增图片 logo 的样式 */
+.cscec-logo-img {
+  height: 46px; /* 控制图片的高度，你可以根据实际图片的比例适当调大或调小 */
+  object-fit: contain; /* 保证图片等比例缩放不拉伸 */
+  margin-right: 15px; /* 让图标和右侧的“中建四局...”标题保持一定间距 */
+  
+  /* 如果你的 logo 图片本身带有白色底色，可以忽略下面两行 */
+  /* 如果是纯透明 logo，且在深蓝色背景下看不清，可以取消下面两行的注释给它加个白底 */
+  /* background-color: #fff; */
+  /* padding: 4px 10px; border-radius: 6px; */
+}
+
 
 .main-content {
   height: calc(1080px - 80px); 
