@@ -73,35 +73,50 @@ class ConstructionLLMParser:
         plan_prompt = """
         你是一个专业的建筑工程项目管理助手。
         我将为你提供一份施工进度计划表的文本（可能来自PDF或Excel提取）。
-        请你从中提取出所有的施工任务节点，并严格按照以下 JSON 数组格式返回，不要包含任何额外的解释或Markdown标记：
+        请你从中提取出计划开始和计划结束时间，并严格按照以下 JSON 数组格式返回，不要包含任何额外的解释或Markdown标记：
         [
             {
-                "zone_name": "区域", 
                 "floor": "楼层",  
-                "planned_start": "2024-05-01 00:00:00", 
-                "planned_end": "2024-05-05 23:59:59"
+                "planned_start": "2024-05-01", 
+                "planned_end": "2024-05-05"
             }
         ]
         注意：
-        1. 时间格式请尽量统一为 YYYY-MM-DD HH:MM:SS。
-        2. 如果某些文本不是具体的任务计划，请忽略它们。
+        1. 如果某些文本不是具体的任务计划，请忽略它们。
         """
 
         try:
+            # 截断过长的文本，防止大模型处理超长Excel时崩溃或乱码（保留前 20000 个字符）
+            safe_text = raw_text[:20000] if len(raw_text) > 20000 else raw_text
+
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[
                     {"role": "system", "content": plan_prompt},
-                    {"role": "user", "content": f"以下是进度计划提取的文本：\n{raw_text}"},
+                    {"role": "user", "content": f"提取以下文本：\n{safe_text}"},
                 ],
-                response_format={"type": "json_object"} # 如果模型支持强制JSON输出
+                temperature=0.1, # 降低温度，让模型的输出更加老实和确定
             )
             
             result_str = response.choices[0].message.content
-            # 兼容处理大模型可能返回的嵌套结构
-            parsed_data = json.loads(result_str)
             
-            # 如果大模型返回的是 {"data": [...]} 这种格式，做一层解包
+            # 【核心修复】：暴力清洗大模型返回的“脏数据”
+            # 1. 移除可能存在的 Markdown 代码块标记
+            result_str = result_str.replace("```json", "").replace("```", "").strip()
+            
+            # 2. 利用正则或字符串查找，强行提取出最外层的方括号 [...] 包含的内容
+            start_idx = result_str.find('[')
+            end_idx = result_str.rfind(']')
+            
+            if start_idx != -1 and end_idx != -1:
+                json_str = result_str[start_idx:end_idx+1]
+            else:
+                json_str = result_str
+                
+            # 解析 JSON
+            parsed_data = json.loads(json_str)
+            
+            # 兼容处理嵌套
             if isinstance(parsed_data, dict):
                 for key in parsed_data:
                     if isinstance(parsed_data[key], list):
@@ -111,6 +126,10 @@ class ConstructionLLMParser:
             
         except Exception as e:
             print(f"进度计划解析出错: {e}")
+            # 如果大模型实在解析烂了，打印出它的原文，方便我们在控制台查看到底写了什么鬼东西
+            try:
+                print(f"【大模型返回的脏字符串内容为】:\n{result_str[:500]} ...")
+            except: pass
             return []
 
 

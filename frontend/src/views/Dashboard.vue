@@ -9,6 +9,10 @@
           <h1 class="sys-title">中建四局进度自动识别算法</h1>
         </div>
         <div class="header-right">
+          <el-button type="warning" plain size="large" @click="planImportVisible = true">
+            <el-icon><UploadFilled /></el-icon> 导入进度计划
+          </el-button>
+
           <el-button type="danger" plain size="large" @click="confirmReset">
             <el-icon><Delete /></el-icon> 重置系统
           </el-button>
@@ -258,7 +262,7 @@
       </div>
     </el-dialog>
     
-    <el-dialog v-model="planImportVisible" title="📄 智能进度计划导入 (AI解析)" width="800px">
+  <el-dialog v-model="planImportVisible" title="📄 智能进度计划导入 (AI解析)" width="800px">
       <div style="margin-bottom: 20px;">
         <el-upload
           drag
@@ -310,10 +314,7 @@
         </el-button>
       </template>
     </el-dialog>
-
-
-  </div>
-</template>
+</div></template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
@@ -328,15 +329,61 @@ const planImportVisible = ref(false)
 const isParsing = ref(false)
 const parsedPlanList = ref([])
 
+const parseFloorNumber = (floorStr) => {
+  if (!floorStr) return 999; // 为空的行排在最底下
+  const str = String(floorStr).toUpperCase().trim();
+  
+  // 处理 B1, B2 等地下室写法 -> 转为 -1, -2
+  if (str.startsWith('B')) {
+    const num = parseInt(str.replace('B', ''));
+    return isNaN(num) ? -99 : -num;
+  }
+  // 处理 "地下1层", "负1" 等中文写法 -> 转为 -1
+  if (str.includes('地下') || str.includes('负')) {
+    const num = parseInt(str.replace(/[^0-9]/g, ''));
+    return isNaN(num) ? -99 : -num;
+  }
+  
+  // 处理正常的纯数字（如 "1", "-2"）
+  const num = parseInt(str);
+  return isNaN(num) ? 999 : num;
+}
+
+// 核心排序函数：按楼层从小到大（从下到上/负数到正数）排序
+const sortPlanList = () => {
+  parsedPlanList.value.sort((a, b) => {
+    return parseFloorNumber(a.floor) - parseFloorNumber(b.floor);
+  });
+}
+
 // 上传并经由后端大模型解析成功后的回调
 const handlePlanParsed = (response) => {
   isParsing.value = false
   if (response.status === 'success') {
-    parsedPlanList.value = response.data
+    // 强制过滤只保留前端需要的字段，防止大模型乱造字段
+    parsedPlanList.value = response.data.map(item => ({
+      floor: item.floor || '',
+      planned_start: item.planned_start || '',
+      planned_end: item.planned_end || ''
+    }));
+    
+    // 拿到数据后立刻执行一次自动排序
+    sortPlanList(); 
+    
     ElMessage.success(response.message)
   } else {
     ElMessage.error(response.message || "解析失败")
   }
+}
+
+// 纯手动新增一行
+const addNewPlanRow = () => {
+  parsedPlanList.value.push({ floor: '', planned_start: '', planned_end: '' });
+}
+
+// 删除某一行
+const removePlanRow = (index) => {
+  parsedPlanList.value.splice(index, 1);
 }
 
 const handlePlanError = () => {
