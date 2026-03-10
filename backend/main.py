@@ -415,41 +415,37 @@ def get_timeline_details(zone_name: str, start_time: str, end_time: str = None):
 
 @app.post("/api/plan/upload")
 async def upload_and_parse_plan(file: UploadFile = File(...)):
-    """接收前端上传的 Excel 或 PDF，提取文本并交由大模型解析"""
     raw_text = ""
     file_ext = file.filename.lower().split('.')[-1]
     
     try:
-        # 【核心修复】：将 FastAPI 的特殊文件对象转换为标准的纯内存字节流
         file_bytes = await file.read()
         import io
         file_stream = io.BytesIO(file_bytes)
 
         if file_ext in ['xlsx', 'xls']:
-            # 读取 Excel (此时传入的是标准字节流，pandas 不会再报错)
             df = pd.read_excel(file_stream)
-            # 将 Excel 转换为纯文本格式（CSV风格的字符串）喂给大模型
             raw_text = df.to_string()
-            
         elif file_ext == 'pdf':
-            # 读取 PDF (同理，pdfplumber 也能完美识别 BytesIO)
             with pdfplumber.open(file_stream) as pdf:
                 for page in pdf.pages:
                     text = page.extract_text()
                     if text: raw_text += text + "\n"
-        else:
-            return {"status": "error", "message": "仅支持 .xlsx 或 .pdf 格式"}
             
         if not raw_text.strip():
-            return {"status": "error", "message": "未能从文件中提取到有效文本"}
+            return {"status": "error", "message": "未能提取到文本"}
             
-        # 调用大模型进行结构化解析
+        # 调用大模型解析
         parsed_plan = parser.parse_project_plan(raw_text)
         
+        # --- 调试代码：在返回给前端前，最后一次确认数据 ---
+        print(f"DEBUG: 准备发送给前端的数据样例: {parsed_plan[0] if parsed_plan else '空'}")
+        
+        # 显式确保每个字典都包含必要的键
         return {
             "status": "success", 
-            "message": "大模型解析成功，请预览确认", 
-            "data": parsed_plan
+            "message": "解析成功", 
+            "data": parsed_plan # 这里的 parsed_plan 必须是包含 'stage' 的字典列表
         }
         
     except Exception as e:

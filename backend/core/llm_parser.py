@@ -142,6 +142,8 @@ class ConstructionLLMParser:
                         cleaned_item = {
                             # 如果没有 floor，就去抓取可能叫 '楼层' 或 '施工层' 的字段
                             "floor": str(item.get("floor", item.get("楼层", item.get("施工层", "")))),
+                            # 新增下面这一行，把 stage 也提取出来
+                            "stage": str(item.get("stage", item.get("工序", item.get("施工工序", "")))),
                             "planned_start": str(item.get("planned_start", item.get("计划开始时间", item.get("开始时间", "")))),
                             "planned_end": str(item.get("planned_end", item.get("计划结束时间", item.get("结束时间", ""))))
                         }
