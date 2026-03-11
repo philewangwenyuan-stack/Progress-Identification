@@ -22,3 +22,13 @@ DB_FILE_PATH = os.path.join(DB_DIR, "construction_progress.db")
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(DB_DIR, exist_ok=True)
 os.makedirs(TEST_MATERIALS_DIR, exist_ok=True)
+
+#数据库配置
+MYSQL_CONFIG = {
+    "host": "127.0.0.1",        # 数据库地址
+    "port": 3306,               # 端口
+    "user": "root",             # 数据库用户名
+    "password": "123456",# 数据库密码
+    "database": "cscec4_progress", # 数据库名称（请先在MySQL中创建此数据库）
+    "charset": "utf8mb4"
+}

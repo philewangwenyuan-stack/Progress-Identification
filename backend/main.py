@@ -5,7 +5,6 @@ import time
 import threading
 import cv2
 import pandas as pd
-import sqlite3
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,10 +17,12 @@ import pandas as pd
 import pdfplumber
 from fastapi import UploadFile, File
 import io
+import pymysql
 # 引入现有的核心组件 
 from config import settings
 from core.llm_parser import ConstructionLLMParser
 from core.spatial_engine import ProjectProgressManager
+from core.spatial_engine import get_db_connection
 
 app = FastAPI(title="CSCEC 智能进度监控 API", version="1.0.0")
 # --- WebSocket 连接管理器 ---
@@ -74,7 +75,7 @@ parser = ConstructionLLMParser(
     model_name=settings.LLM_MODEL_NAME,
     log_file_path=settings.LOG_FILE_PATH
 )
-manager = ProjectProgressManager(db_path=settings.DB_FILE_PATH)
+manager = ProjectProgressManager()
 
 # --- 辅助函数 (复用您的逻辑) ---
 def load_config():
@@ -159,16 +160,20 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.get("/api/progress")
 def get_progress():
     """获取整体进度看板数据"""
-    if not os.path.exists(settings.DB_FILE_PATH): return {"data": []}
-    with sqlite3.connect(settings.DB_FILE_PATH) as conn:
+    conn = get_db_connection()
+    try:
+        # 查询 zone_states_v2 表的所有数据
         df = pd.read_sql_query("SELECT zone_name, floor, stage, is_poured FROM zone_states_v2", conn)
         return {"data": df.to_dict(orient="records")}
+    except Exception as e:
+        print(f"获取看板数据异常: {e}")
+        return {"data": []}
+    finally:
+        conn.close()
 
 @app.get("/api/timeline/{zone_name}") #进度对比
 def get_timeline(zone_name: str):
     """获取单个区域的时间轴，并结合导入的进度计划计算滞后状态"""
-    if not os.path.exists(settings.DB_FILE_PATH): return {"data": []}
-    
     # 1. 尝试加载前端之前导入保存的本地进度计划表
     plan_data = []
     plan_path = os.path.join(settings.DATA_DIR, "project_plan.json")
@@ -179,9 +184,20 @@ def get_timeline(zone_name: str):
         except Exception:
             pass
 
-    with sqlite3.connect(settings.DB_FILE_PATH) as conn:
-        df = pd.read_sql_query("SELECT floor, stage, start_time, end_time FROM stage_timeline WHERE zone_name = ? ORDER BY id DESC", conn, params=(zone_name,))
+    # ============ 核心修改：MySQL 查询部分 ============
+    conn = get_db_connection()
+    try:
+        # 恢复你原本的查询逻辑，将占位符改为 %s
+        df = pd.read_sql_query(
+            "SELECT floor, stage, start_time, end_time FROM stage_timeline WHERE zone_name = %s ORDER BY id DESC", 
+            conn, params=(zone_name,)
+        )
         records = df.to_dict(orient="records")
+    except Exception as e:
+        print(f"获取时间轴异常: {e}")
+        records = []
+    finally:
+        conn.close()
         
         # 2. 对比实际进度与计划进度
         for row in records:
@@ -260,23 +276,28 @@ class ManualFixRequest(BaseModel):
 def manual_fix_progress(req: ManualFixRequest):
     """人工介入：强制修改某个区域的楼层和状态"""
     try:
-        # 调用你在 spatial_engine.py 中写好的 manual_fix_zone 函数
         manager.manual_fix_zone(req.zone_name, req.target_floor, req.target_stage)
         
-        # 记录一条特殊的人工干预日志到底层表里，保持时间轴连续性
         record_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with sqlite3.connect(settings.DB_FILE_PATH) as conn:
-            cursor = conn.cursor()
-            # 结束上一条状态
-            cursor.execute("""UPDATE stage_timeline SET end_time = ? 
-                              WHERE zone_name = ? AND end_time IS NULL""", 
-                           (record_time, req.zone_name))
-            # 插入强制修改的新状态
-            cursor.execute("""INSERT INTO stage_timeline (zone_name, floor, stage, start_time) 
-                              VALUES (?, ?, ?, ?)""", 
-                           (req.zone_name, req.target_floor, req.target_stage, record_time))
+        
+        # ============ 核心修改：使用 MySQL 连接 ============
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cursor:
+                # 结束上一条状态 (%s 占位符)
+                cursor.execute("""UPDATE stage_timeline SET end_time = %s 
+                                  WHERE zone_name = %s AND end_time IS NULL""", 
+                               (record_time, req.zone_name))
+                # 插入强制修改的新状态 (%s 占位符)
+                cursor.execute("""INSERT INTO stage_timeline (zone_name, floor, stage, start_time) 
+                                  VALUES (%s, %s, %s, %s)""", 
+                               (req.zone_name, req.target_floor, req.target_stage, record_time))
             conn.commit()
-        notify_frontend()  # <--- 新增：手工修正数据后主动推送更新通知给前端
+        finally:
+            conn.close()
+        # ===============================================
+            
+        notify_frontend()
         return {"status": "success", "message": f"{req.zone_name} 已由人工指令强制变更为：{req.target_floor}层 - {req.target_stage}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"手动修改失败: {str(e)}")
