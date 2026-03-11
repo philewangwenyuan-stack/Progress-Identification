@@ -222,7 +222,6 @@ def get_timeline_details(
     work_end: str = "23:59:59",    
     ignore_stage_time: str = "true" 
 ):
-    print(f"\n🚀 [超级调试] 接口被调用！正在查询区域: {zone_name}", flush=True)
 
     # 修复时间中的 T，防止解析崩溃
     start_time = start_time.replace("T", " ") if start_time else start_time
@@ -269,7 +268,6 @@ def get_timeline_details(
                 cursor.execute(query, (f"%{zone_name}%", actual_start, work_start, work_end))
                 
             rows = cursor.fetchall()
-            print(f"📊 [SQL结果] 查出 {len(rows)} 条数据，准备过滤计算...", flush=True)
             
             for row in rows:
                 desc = row.get("description", "")
@@ -319,8 +317,6 @@ def get_timeline_details(
         
     duration_days = max((end_t_obj - start_t_obj).total_seconds() / 86400, 1.0)
     total_man_days = round(avg_workers * duration_days, 1)
-
-    print(f"🏁 [计算完成] 实际有效记录: {count}条。截取最新 100 条返回前端。", flush=True)
 
     return {"logs": logs[:100], "avg_workers": avg_workers, "count": count, "total_man_days": total_man_days}
 
