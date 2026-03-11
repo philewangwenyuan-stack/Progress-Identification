@@ -388,122 +388,108 @@ def get_timeline_details(
     zone_name: str, 
     start_time: str, 
     end_time: str = None,
-    work_start: str = "00:00:00",     # 接收前端传来的：作业开始时间
-    work_end: str = "23:59:59",       # 接收前端传来的：作业结束时间
-    ignore_stage_time: str = "false"  # 接收前端传来的：是否忽略严格时间（按整天算）
+    work_start: str = "00:00:00",  # 新增：接收前端的作业开始时间
+    work_end: str = "23:59:59",    # 新增：接收前端的作业结束时间
+    ignore_stage_time: str = "true" # 新增：接收前端的“放宽到整天计算”开关
 ):
-    """从 MySQL 中获取指定时间段、指定区域的抓拍记录，并应用前端的过滤规则"""
-    import pymysql
-    from datetime import datetime, timedelta
-
-    # 1. 净化前端传来的基础时间
-    start_time = start_time.replace("T", " ") if start_time else "1970-01-01 00:00:00"
-    if start_time.lower() in ["null", "none", "undefined", ""]:
-        start_time = "1970-01-01 00:00:00"
-        
-    if end_time:
-        end_time = end_time.replace("T", " ")
-        if end_time.lower() in ["null", "none", "undefined", ""]:
-            end_time = None
-
-    # 2. 转换为 Python 的 datetime 对象以便计算
-    try:
-        start_dt = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
-    except:
-        start_dt = datetime.now()
-
-    if end_time:
-        try:
-            end_dt = datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
-        except:
-            end_dt = datetime.now()
-    else:
-        end_dt = datetime.now()
-
-
-    # ================= 动作 1：处理“强制放宽到整天计算” =================
-    if str(ignore_stage_time).lower() == "true":
-        # 如果前端勾选了忽略时间，直接取 start_time 当天的 00:00:00
-        query_start = start_dt.strftime("%Y-%m-%d 00:00:00")
-        # 结束时间取 end_time 当天的 23:59:59
-        query_end = end_dt.strftime("%Y-%m-%d 23:59:59")
-    else:
-        # 否则严格按照时间起止（给 12 小时宽限期兜底）
-        query_start = (start_dt - timedelta(hours=12)).strftime("%Y-%m-%d %H:%M:%S")
-        query_end = end_dt.strftime("%Y-%m-%d %H:%M:%S")
-        
-        if len(rows) > 0:
-            print(f"3. 第一条抓拍时间: {rows[0]['recognition_time']}, 时分秒: {rows[0]['recognition_time'].strftime('%H:%M:%S')}")
-            # 👆👆👆 加入这 4 行调试代码 👆👆👆        
     logs = []
     total_workers = 0
     count = 0
     
+    # 将前端传来的字符串 boolean 转换为 Python bool
+    is_ignore_strict = str(ignore_stage_time).lower() == 'true'
+
     conn = get_db_connection()
     try:
         with conn.cursor(pymysql.cursors.DictCursor) as cursor:
-            # 统一使用计算好的 query_start 和 query_end 提取数据
-            query = """SELECT * FROM recognition_history 
-                       WHERE zone_name LIKE %s 
-                       AND recognition_time >= %s 
-                       AND recognition_time <= %s 
-                       ORDER BY recognition_time DESC"""
-            cursor.execute(query, (f"%{zone_name}%", query_start, query_end))
+            actual_start = start_time
+            actual_end = end_time
+            
+            # 核心修复 1：如果前端勾选了“强制放宽”，则剥离掉具体的小时/分钟/秒，拉宽到当天的 00:00 到 23:59
+            if is_ignore_strict:
+                try:
+                    dt_start = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+                    actual_start = dt_start.strftime("%Y-%m-%d 00:00:00")
+                    if end_time:
+                        dt_end = datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
+                        actual_end = dt_end.strftime("%Y-%m-%d 23:59:59")
+                except Exception:
+                    pass
+
+            # 核心修复 2：在 SQL 查询中增加 TIME() 函数过滤，对接前端设置的 dailyTimeRange
+            if actual_end:
+                query = """SELECT * FROM recognition_history 
+                           WHERE zone_name LIKE %s 
+                           AND recognition_time >= %s 
+                           AND recognition_time < %s 
+                           AND TIME(recognition_time) >= %s 
+                           AND TIME(recognition_time) <= %s
+                           ORDER BY recognition_time DESC"""
+                cursor.execute(query, (f"%{zone_name}%", actual_start, actual_end, work_start, work_end))
+            else:
+                query = """SELECT * FROM recognition_history 
+                           WHERE zone_name LIKE %s 
+                           AND recognition_time >= %s 
+                           AND TIME(recognition_time) >= %s 
+                           AND TIME(recognition_time) <= %s
+                           ORDER BY recognition_time DESC"""
+                cursor.execute(query, (f"%{zone_name}%", actual_start, work_start, work_end))
                 
             rows = cursor.fetchall()
+            print(f"🔍 [调试] 数据库查询完毕，原始记录有: {len(rows)} 条") # 👈 新增打印 1
             for row in rows:
-                rec_time = row["recognition_time"]
-                if not rec_time:
-                    continue
-                    
-                # ================= 动作 2：过滤“每日有效作业时段” =================
-                time_str = rec_time.strftime("%H:%M:%S")
-                if not (work_start <= time_str <= work_end):
-                    # 如果抓拍的时间不在设定的工作时间（如 05:00~22:00）内，直接跳过不计入！
-                    continue 
-
                 desc = row.get("description", "")
-                stage = row.get("stage", "")
-                
-                # 保留有效识别结果
-                if stage == "识别失败" or "图像内容为空" in desc:
+                print(f"📦 [调试] 正在分析第 {len(logs)+1} 条: 人数内容='{row['workers']}', 描述='{desc}'") #
+                # 注意：这里依然保留了硬性过滤。如果大模型明确说“无有效人员”等，依然会被过滤。
+                if "无法识别" in desc or "无有效" in desc or "图像内容为空" in desc:
+                    
                     continue
                     
                 logs.append({
                     "位置": row["zone_name"],
                     "人数": row["workers"],
-                    "当前作业工序": stage,
+                    "当前作业工序": row["stage"],
                     "视觉确认描述": desc,
-                    "识别时间": rec_time.strftime("%Y-%m-%d %H:%M:%S")
+                    "识别时间": row["recognition_time"].strftime("%Y-%m-%d %H:%M:%S")
                 })
-                # ================= 动作 3：累计抓拍总次数和总人数 =================
+                
                 workers_str = str(row["workers"])
-                import re
+                workers_cnt = 0
+                
+                # 核心修复 3：增加中文数字兼容，防止大模型返回中文如"两名工人"导致人数识别为 0
                 nums = re.findall(r'\d+', workers_str)
+                cn_num_map = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+                cn_match = None
+                for cn_char, num_val in cn_num_map.items():
+                    if cn_char in workers_str:
+                        cn_match = num_val
+                        break
+
                 if nums:
-                    total_workers += int(nums[0])
+                    workers_cnt = int(nums[0])
+                elif cn_match:
+                    workers_cnt = cn_match
                 elif "多" in workers_str or "若干" in workers_str:
-                    total_workers += 5
+                    workers_cnt = 5
                     
+                total_workers += workers_cnt
                 count += 1
     except Exception as e:
         print(f"提取明细异常: {e}")
     finally:
         conn.close()
 
-    # 计算日均作业人数
     avg_workers = round(total_workers / count, 1) if count > 0 else 0
-
-    # 计算人天
-    duration_days = max((end_dt - start_dt).total_seconds() / 86400, 1.0)
+    start_t_obj = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+    if end_time:
+        end_t_obj = datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
+    else:
+        end_t_obj = datetime.now()
+        
+    duration_days = max((end_t_obj - start_t_obj).total_seconds() / 86400, 1.0)
     total_man_days = round(avg_workers * duration_days, 1)
 
-    return {
-        "logs": logs, 
-        "avg_workers": avg_workers, 
-        "count": count, 
-        "total_man_days": total_man_days
-    }
+    return {"logs": logs, "avg_workers": avg_workers, "count": count, "total_man_days": total_man_days}
 
 # ================= 计划上传与保存 =================
 @app.post("/api/plan/upload")
