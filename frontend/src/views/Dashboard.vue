@@ -410,6 +410,23 @@ import { Setting, Edit, Delete, UploadFilled, Loading, Plus, Calendar } from '@e
 
 const apiBase = 'http://localhost:8000/api'
 
+// ======= 新增：配置 Axios 全局超时与错误拦截 =======
+axios.defaults.timeout = 5000; // 强制设置 5 秒超时，避免无限加载
+
+axios.interceptors.response.use(
+  response => response,
+  error => {
+    // 统一处理网络超时或被拒的情况
+    if (error.code === 'ECONNABORTED' || error.message.includes('timeout') || error.message === 'Network Error') {
+      ElMessage.error({
+        message: "网络请求超时或失败！请检查 Python 后端及 MySQL 是否已启动",
+        duration: 5000
+      });
+    }
+    return Promise.reject(error);
+  }
+);
+
 const isParsing = ref(false)
 const parsedPlanList = ref([])
 
@@ -744,10 +761,15 @@ const addLog = (msg, type = 'info') => {
   nextTick(() => { if (terminalRef.value) terminalRef.value.scrollTop = terminalRef.value.scrollHeight })
 }
 
+
 const fetchConfig = async () => {
-  const res = await axios.get(`${apiBase}/config`)
-  config.value = res.data
-  configForm.value = { ...res.data, floors_str: (res.data.floors || []).join(',') }
+  try {
+    const res = await axios.get(`${apiBase}/config`)
+    config.value = res.data
+    configForm.value = { ...res.data, floors_str: (res.data.floors || []).join(',') }
+  } catch (error) {
+    console.error("配置获取失败:", error)
+  }
 }
 
 // 新增：从后端拉取已经保存的进度计划
@@ -764,11 +786,15 @@ const fetchPlanList = async () => {
 }
 
 const fetchProgress = async () => {
-  const res = await axios.get(`${apiBase}/progress`)
-  progressData.value = res.data.data || []
-  if(progressData.value.length > 0 && !selectedZone.value) {
-    selectedZone.value = progressData.value[0].zone_name
-    fetchTimeline()
+  try {
+    const res = await axios.get(`${apiBase}/progress`)
+    progressData.value = res.data.data || []
+    if(progressData.value.length > 0 && !selectedZone.value) {
+      selectedZone.value = progressData.value[0].zone_name
+      fetchTimeline()
+    }
+  } catch (error) {
+    console.error("获取进度失败，请检查后端或数据库是否启动:", error);
   }
 }
 
