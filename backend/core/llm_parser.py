@@ -21,11 +21,12 @@ class ConstructionLLMParser:
         """
 
     # 增加 forced_zone 参数
+
     def parse_instruction_with_image(self, text_instruction: str, image_path: str, forced_zone: str = None) -> dict:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] 正在处理并解析图片: {os.path.basename(image_path)}")
         
         try:
-            # 1. 处理图片 (Base64) - 保持不变
+            # 1. 处理图片 (Base64)
             if not image_path.startswith(('http://', 'https://')):
                 with open(image_path, "rb") as image_file:
                     base64_image = base64.b64encode(image_file.read()).decode('utf-8')
@@ -33,7 +34,7 @@ class ConstructionLLMParser:
             else:
                 final_image_url = image_path
 
-            # 2. 调用 API - 保持不变
+            # 2. 调用 API
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[
@@ -54,18 +55,17 @@ class ConstructionLLMParser:
             parsed_data["识别时间"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             parsed_data["原始图片路径"] = image_path
             
-            # 【修复核心 1】：在落盘保存日志前，强行修正为真实的施工区域！
             if forced_zone:
                 parsed_data["位置"] = forced_zone
             
-            # 4. 存储数据
-            self._save_to_local(parsed_data)
-            
+            # --- 删除原有的 self._save_to_local(parsed_data) ---
             return parsed_data
             
         except Exception as e:
             print(f"解析出错: {e}")
             return {}
+
+    # 注意：请将原文件最底部的 _save_to_local 方法整段删掉
 
     #进度计划解析
     def parse_project_plan(self, raw_text: str) -> list:

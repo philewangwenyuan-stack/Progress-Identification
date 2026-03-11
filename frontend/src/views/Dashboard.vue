@@ -173,10 +173,10 @@
           </el-select>
         </el-form-item>
         <el-form-item label="目标楼层">
-          <el-select v-model="manualForm.target_floor" style="width: 100%">
+          <el-select v-model="manualForm.target_floor" style="width: 100%" filterable allow-create placeholder="请选择或输入目标楼层">
             <el-option v-for="floor in config.floors" :key="floor" :label="floor + '层'" :value="floor" />
           </el-select>
-        </el-form-item>  
+        </el-form-item>
         <el-form-item label="目标工序">
           <el-select v-model="manualForm.target_stage" style="width: 100%">
             <el-option label="模板阶段" value="模板阶段" />
@@ -344,9 +344,11 @@
             </div>
             
             <el-table :data="parsedPlanList" border stripe height="320" size="small">
-              <el-table-column label="施工楼层" width="100" align="center">
+              <el-table-column label="施工楼层" width="130" align="center">
                 <template #default="scope">
-                  <el-input v-model="scope.row.floor" placeholder="如: 1" />
+                  <el-select v-model="scope.row.floor" placeholder="选择或输入" filterable allow-create>
+                    <el-option v-for="item in config.floors" :key="item" :label="item" :value="item" />
+                  </el-select>
                 </template>
               </el-table-column>
               
@@ -600,6 +602,19 @@ const fetchConfig = async () => {
   configForm.value = { ...res.data, floors_str: (res.data.floors || []).join(',') }
 }
 
+// 新增：从后端拉取已经保存的进度计划
+const fetchPlanList = async () => {
+  try {
+    const res = await axios.get(`${apiBase}/plan`)
+    if (res.data && res.data.status === 'success') {
+      // 把后端传来的数据塞给表格绑定的变量
+      parsedPlanList.value = res.data.data || []
+    }
+  } catch (e) {
+    console.error("获取进度计划失败:", e)
+  }
+}
+
 const fetchProgress = async () => {
   const res = await axios.get(`${apiBase}/progress`)
   progressData.value = res.data.data || []
@@ -723,6 +738,7 @@ onMounted(() => {
   fetchConfig()
   fetchProgress()
   fetchLatestLog() 
+  fetchPlanList() 
   snapshotUrl.value = `${apiBase}/snapshot/latest?t=${new Date().getTime()}`
   addLog("系统初始化成功，大模型引擎就绪。", "info")
   connectWebSocket()

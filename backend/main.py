@@ -1,30 +1,28 @@
-#python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000 启动
+# python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000 启动
 import os
 import json
 import time
 import threading
 import cv2
 import pandas as pd
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime
 import re
 import asyncio
-from fastapi import WebSocket, WebSocketDisconnect
-import pandas as pd
 import pdfplumber
-from fastapi import UploadFile, File
 import io
 import pymysql
+
 # 引入现有的核心组件 
 from config import settings
 from core.llm_parser import ConstructionLLMParser
-from core.spatial_engine import ProjectProgressManager
-from core.spatial_engine import get_db_connection
+from core.spatial_engine import ProjectProgressManager, get_db_connection
 
 app = FastAPI(title="CSCEC 智能进度监控 API", version="1.0.0")
+
 # --- WebSocket 连接管理器 ---
 class ConnectionManager:
     def __init__(self):
@@ -56,16 +54,15 @@ def notify_frontend():
             main_loop
         )
 
-# 允许跨域，方便前后端分离本地调试
+# 允许跨域，注意 allow_credentials 必须是 False 才能配合 "*"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-CONFIG_PATH = os.path.join(settings.DATA_DIR, "project_config.json")
 SNAPSHOT_PATH = os.path.join(settings.DATA_DIR, "latest_snapshot.jpg")
 
 # 全局引擎实例
@@ -77,23 +74,64 @@ parser = ConstructionLLMParser(
 )
 manager = ProjectProgressManager()
 
-# --- 辅助函数 (复用您的逻辑) ---
-def load_config():
-    default_config = {
-        "floors": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
-        "rtsp_url": "rtsp://14.18.91.10:10554/rtp/...",
-        "auto_interval_minutes": 0,
-        "current_zone": "塔楼A区"
-    }
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                default_config.update(json.load(f))
-        except Exception: pass
-    return default_config
+# ================= 数据库初始化 =================
+def init_db_tables():
+    """系统启动时自动初始化 MySQL 表结构"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            # 1. 创建全局配置表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS project_config (
+                    id INT PRIMARY KEY,
+                    rtsp_url VARCHAR(500),
+                    current_zone VARCHAR(100),
+                    auto_interval_minutes INT,
+                    floors JSON
+                )
+            ''')
+            # 确保有一条基础数据 id=1
+            cursor.execute("SELECT id FROM project_config WHERE id = 1")
+            if not cursor.fetchone():
+                cursor.execute("""
+                    INSERT INTO project_config (id, rtsp_url, current_zone, auto_interval_minutes, floors) 
+                    VALUES (1, '', '塔楼A区', 0, '[]')
+                """)
+
+            # 2. 创建进度计划表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS project_plan (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    floor VARCHAR(100),
+                    stage VARCHAR(100),
+                    planned_start VARCHAR(50),
+                    planned_end VARCHAR(50)
+                )
+            ''')
+            conn.commit()
+    except Exception as e:
+        print(f"初始化配置表失败: {e}")
+    finally:
+        conn.close()
+
+# ================= 辅助函数 =================
+def get_config_from_db():
+    """从 MySQL 提取全局配置（替代原先的 load_config）"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute("SELECT * FROM project_config WHERE id = 1")
+            row = cursor.fetchone()
+            if row:
+                row['floors'] = json.loads(row['floors']) if row['floors'] else []
+                return row
+    except Exception as e:
+        print(f"提取配置异常: {e}")
+    finally:
+        conn.close()
+    return {"floors": [], "rtsp_url": "", "auto_interval_minutes": 0, "current_zone": "塔楼A区"}
 
 def capture_rtsp_frame(rtsp_url, save_path):
-    # (完全复用您 app.py 中的 capture_rtsp_frame 代码)
     try:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "timeout;5000"
@@ -114,7 +152,7 @@ def capture_rtsp_frame(rtsp_url, save_path):
 def auto_capture_task():
     while True:
         try:
-            config = load_config()
+            config = get_config_from_db()
             interval = config.get("auto_interval_minutes", 0)
             rtsp_url = config.get("rtsp_url", "")
             zone_name = config.get("current_zone", "")
@@ -139,19 +177,18 @@ def auto_capture_task():
 
 @app.on_event("startup")
 async def startup_event():
+    init_db_tables() # 启动时初始化表
     global main_loop
-    main_loop = asyncio.get_running_loop()  # 捕获主事件循环，方便子线程调用
-    # 启动后台守护线程
+    main_loop = asyncio.get_running_loop()  
     t = threading.Thread(target=auto_capture_task, daemon=True)
     t.start()
 
-# --- 新增的 WebSocket 监听接口 ---
 @app.websocket("/api/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await ws_manager.connect(websocket)
     try:
         while True:
-            await websocket.receive_text() # 保持连接心跳
+            await websocket.receive_text() 
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket)
 
@@ -159,95 +196,82 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.get("/api/progress")
 def get_progress():
-    """获取整体进度看板数据"""
     conn = get_db_connection()
     try:
-        # 查询 zone_states_v2 表的所有数据
-        df = pd.read_sql_query("SELECT zone_name, floor, stage, is_poured FROM zone_states_v2", conn)
-        return {"data": df.to_dict(orient="records")}
+        import pymysql
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute("SELECT zone_name, floor, stage, is_poured FROM zone_states_v2")
+            records = cursor.fetchall()
+            return {"data": records}
     except Exception as e:
         print(f"获取看板数据异常: {e}")
         return {"data": []}
     finally:
         conn.close()
 
-@app.get("/api/timeline/{zone_name}") #进度对比
+@app.get("/api/timeline/{zone_name}")
 def get_timeline(zone_name: str):
-    """获取单个区域的时间轴，并结合导入的进度计划计算滞后状态"""
-    # 1. 尝试加载前端之前导入保存的本地进度计划表
+    """获取单个区域的时间轴，并结合 MySQL 里的进度计划计算滞后状态"""
     plan_data = []
-    plan_path = os.path.join(settings.DATA_DIR, "project_plan.json")
-    if os.path.exists(plan_path):
-        try:
-            with open(plan_path, "r", encoding="utf-8") as f:
-                plan_data = json.load(f)
-        except Exception:
-            pass
-
-    # ============ 核心修改：MySQL 查询部分 ============
     conn = get_db_connection()
     try:
-        # 恢复你原本的查询逻辑，将占位符改为 %s
-        df = pd.read_sql_query(
-            "SELECT floor, stage, start_time, end_time FROM stage_timeline WHERE zone_name = %s ORDER BY id DESC", 
-            conn, params=(zone_name,)
-        )
-        records = df.to_dict(orient="records")
+        # 1. 提取当前 MySQL 中的进度计划
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute("SELECT floor, stage, planned_start, planned_end FROM project_plan")
+            plan_data = cursor.fetchall()
+            
+        # 2. 提取时间轴
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute(
+                "SELECT floor, stage, start_time, end_time FROM stage_timeline WHERE zone_name = %s ORDER BY id DESC", 
+                (zone_name,)
+            )
+            records = cursor.fetchall()
     except Exception as e:
         print(f"获取时间轴异常: {e}")
         records = []
     finally:
         conn.close()
         
-        # 2. 对比实际进度与计划进度
-        for row in records:
-            row["status"] = "未排期"  # 默认无计划状态
-            row["planned_start"] = "暂无计划"
-            row["planned_end"] = "暂无计划"
-            
-            # 寻找当前楼层和工序对应的计划
-            for p in plan_data:
-                # 强行转为字符串比对，防止数据库存 int 计划表存 str 导致不匹配
-                if str(p.get("floor", "")) == str(row["floor"]) and p.get("stage", "") == row["stage"]:
-                    row["planned_start"] = p.get("planned_start", "")
-                    row["planned_end"] = p.get("planned_end", "")
-                    row["status"] = "正常" # 匹配上计划后，先暂定正常
-                    
-                    try:
-                        # 滞后计算核心逻辑：
-                        # 如果有计划结束时间，将实际日期与之比对
-                        if row["planned_end"]:
-                            # 解析大模型提取的计划日期 (处理可能出现的斜杠等不规范格式)
-                            clean_plan_end = row["planned_end"].replace("/", "-")
-                            planned_end_dt = datetime.strptime(clean_plan_end, "%Y-%m-%d").date()
+    # 3. 对比实际进度与计划进度
+    for row in records:
+        row["status"] = "未排期"  
+        row["planned_start"] = "暂无计划"
+        row["planned_end"] = "暂无计划"
+        
+        for p in plan_data:
+            if str(p.get("floor", "")) == str(row["floor"]) and p.get("stage", "") == row["stage"]:
+                row["planned_start"] = p.get("planned_start", "")
+                row["planned_end"] = p.get("planned_end", "")
+                row["status"] = "正常" 
+                
+                try:
+                    if row["planned_end"]:
+                        clean_plan_end = row["planned_end"].replace("/", "-")
+                        planned_end_dt = datetime.strptime(clean_plan_end, "%Y-%m-%d").date()
+                        
+                        if row["end_time"]:
+                            actual_dt = datetime.strptime(row["end_time"], "%Y-%m-%d %H:%M:%S").date()
+                        else:
+                            actual_dt = datetime.now().date()
                             
-                            # 如果该工序已实际结束，拿实际结束时间比；如果还在进行中，拿系统当前时间比
-                            if row["end_time"]:
-                                actual_dt = datetime.strptime(row["end_time"], "%Y-%m-%d %H:%M:%S").date()
-                            else:
-                                actual_dt = datetime.now().date()
-                                
-                            # 如果实际时间 超出了 计划结束时间，判定为滞后！
-                            if actual_dt > planned_end_dt:
-                                row["status"] = "滞后"
-                                
-                    except Exception as e:
-                        pass # 如果日期格式大模型解析得乱七八糟，就跳过比对逻辑，不强行报错
-                    break # 找到匹配的计划就跳出循环
-                    
-        return {"data": records}
+                        if actual_dt > planned_end_dt:
+                            row["status"] = "滞后"
+                except Exception:
+                    pass 
+                break 
+                
+    return {"data": records}
 
 @app.get("/api/snapshot/latest")
 def get_latest_snapshot():
-    """获取最新抓拍的图片文件"""
     if os.path.exists(SNAPSHOT_PATH):
         return FileResponse(SNAPSHOT_PATH, media_type="image/jpeg")
     raise HTTPException(status_code=404, detail="尚无抓拍图片")
 
 @app.post("/api/capture/manual")
 def manual_capture():
-    """手动触发抓拍与大模型解析"""
-    config = load_config()
+    config = get_config_from_db()
     rtsp_url = config.get("rtsp_url", "")
     zone_name = config.get("current_zone", "塔楼A区")
         
@@ -258,15 +282,11 @@ def manual_capture():
         manager.parse_json_log(result)
         notify_frontend()
         if result.get("当前作业工序", "识别失败") == "识别失败":
-            # 关键修改：加入了 llm_result 字段返回给前端
             return {"status": "warning", "message": "抓拍完成，但 AI 识别异常", "llm_result": result}
-            
-        # 关键修改：加入了 llm_result 字段返回给前端
         return {"status": "success", "message": "智能识别完成，进度已更新！", "llm_result": result}
     else:
         raise HTTPException(status_code=500, detail=msg)
 
-# ================= 手动强制修改楼层接口 =================
 class ManualFixRequest(BaseModel):
     zone_name: str
     target_floor: str
@@ -274,35 +294,29 @@ class ManualFixRequest(BaseModel):
 
 @app.post("/api/progress/manual")
 def manual_fix_progress(req: ManualFixRequest):
-    """人工介入：强制修改某个区域的楼层和状态"""
     try:
         manager.manual_fix_zone(req.zone_name, req.target_floor, req.target_stage)
-        
         record_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        # ============ 核心修改：使用 MySQL 连接 ============
         conn = get_db_connection()
         try:
             with conn.cursor() as cursor:
-                # 结束上一条状态 (%s 占位符)
                 cursor.execute("""UPDATE stage_timeline SET end_time = %s 
                                   WHERE zone_name = %s AND end_time IS NULL""", 
                                (record_time, req.zone_name))
-                # 插入强制修改的新状态 (%s 占位符)
                 cursor.execute("""INSERT INTO stage_timeline (zone_name, floor, stage, start_time) 
                                   VALUES (%s, %s, %s, %s)""", 
                                (req.zone_name, req.target_floor, req.target_stage, record_time))
             conn.commit()
         finally:
             conn.close()
-        # ===============================================
             
         notify_frontend()
         return {"status": "success", "message": f"{req.zone_name} 已由人工指令强制变更为：{req.target_floor}层 - {req.target_stage}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"手动修改失败: {str(e)}")
-# ==============================================================
-# 配置相关的 Pydantic 模型
+
+# ================= 系统与配置相关 =================
 class ConfigUpdate(BaseModel):
     rtsp_url: str
     current_zone: str
@@ -311,129 +325,128 @@ class ConfigUpdate(BaseModel):
 
 @app.get("/api/config")
 def get_config():
-    return load_config()
+    return get_config_from_db()
 
 @app.post("/api/config")
 def update_config(config_data: ConfigUpdate):
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(config_data.dict(), f, ensure_ascii=False, indent=4)
-    return {"status": "success", "message": "配置已更新"}
+    """保存配置并写入 MySQL"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            floors_json = json.dumps(config_data.floors, ensure_ascii=False)
+            cursor.execute("""
+                UPDATE project_config 
+                SET rtsp_url=%s, current_zone=%s, auto_interval_minutes=%s, floors=%s 
+                WHERE id=1
+            """, (
+                config_data.rtsp_url,
+                config_data.current_zone,
+                config_data.auto_interval_minutes,
+                floors_json
+            ))
+            conn.commit()
+        return {"status": "success", "message": "配置已更新"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
 
 @app.post("/api/project/reset")
 def reset_project_api():
-    """提供给前端的系统全盘重置接口"""
     try:
         manager.reset_project()
         return {"status": "success", "message": "系统数据已全部清空，项目已重置归零！"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
 
+# ================= 日志查询 =================
 @app.get("/api/logs/latest")
 def get_latest_log():
-    """解决 Bug 3: 获取最近一次的 AI 识别记录，用于页面刷新后回显"""
-    if not os.path.exists(settings.LOG_FILE_PATH):
-        return {"data": None}
+    conn = get_db_connection()
     try:
-        with open(settings.LOG_FILE_PATH, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-            if lines:
-                return {"data": json.loads(lines[-1])}
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute("SELECT * FROM recognition_history ORDER BY id DESC LIMIT 1")
+            row = cursor.fetchone()
+            if row:
+                return {"data": {
+                    "位置": row["zone_name"],
+                    "人数": row["workers"],
+                    "当前作业工序": row["stage"],
+                    "视觉确认描述": row["description"],
+                    "识别时间": row["recognition_time"].strftime("%Y-%m-%d %H:%M:%S") if row["recognition_time"] else "",
+                    "原始图片路径": row["image_path"]
+                }}
     except Exception:
         pass
+    finally:
+        conn.close()
     return {"data": None}
-
 
 @app.get("/api/timeline/details")
 def get_timeline_details(zone_name: str, start_time: str, end_time: str = None):
-    """点击时间轴获取该时间段内所有抓拍数据（合并同名区域，一条记录=一张照片）"""
-    import re
-    from datetime import datetime
-    import json
-    import os
-
     logs = []
-    total_workers = 0  # 记录所有照片中出现的人数总和
-    count = 0          # 记录一共抓拍了多少张有效照片
+    total_workers = 0
+    count = 0
     
-    if os.path.exists(settings.LOG_FILE_PATH):
-        with open(settings.LOG_FILE_PATH, 'r', encoding='utf-8') as f:
-            for line in f:
-                try:
-                    data = json.loads(line)
-                    
-                    # 【核心修复 1】：把所有同名区域合并起来（模糊匹配）
-                    saved_zone = data.get('位置', '')
-                    clean_saved = saved_zone.strip()
-                    clean_target = zone_name.strip()
-                    
-                    # 如果日志里的位置不是空的，也不是“识别失败”
-                    # 那么只要目标区域名称包含在日志名称里，或者日志名称包含在目标名称里，都算匹配！
-                    # （例如："澳门银行" 和 "澳门银行一区" 会被合并算在一起）
-                    if clean_saved and clean_saved != "识别失败":
-                        if clean_target not in clean_saved and clean_saved not in clean_target:
-                            continue # 名字完全不沾边，跳过
-
-                    # 解析时间
-                    log_time_str = data.get('识别时间')
-                    if not log_time_str: continue
-                    
-                    log_time = datetime.strptime(log_time_str, "%Y-%m-%d %H:%M:%S")
-                    start_t = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
-                    
-                    if end_time:
-                        end_t = datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
-                        in_range = (start_t <= log_time < end_t) 
-                    else:
-                        end_t = datetime.now()
-                        in_range = (start_t <= log_time <= end_t)
-                    
-                    if in_range:
-                        # 过滤无效记录：如果视觉描述包含“无法识别”或“无有效信息”，则不计入统计
-                        desc = data.get("视觉确认描述", "")
-                        if "无法识别" in desc or "无有效" in desc or "图像内容为空" in desc:
-                            continue
-                            
-                        logs.append(data)
-                        
-                        # 【核心修复 2】：增强人数解析逻辑
-                        workers = data.get("人数", 0)
-                        workers_cnt = 0
-                        if isinstance(workers, int):
-                            workers_cnt = workers
-                        elif isinstance(workers, str):
-                            nums = re.findall(r'\d+', workers)
-                            if nums:
-                                workers_cnt = int(nums[0])
-                            elif "多" in workers or "若干" in workers:
-                                workers_cnt = 5 # 预估值
-                            else:
-                                workers_cnt = 0
-                            
-                        total_workers += workers_cnt
-                        count += 1
-                except Exception:
+    conn = get_db_connection()
+    try:
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            if end_time:
+                query = """SELECT * FROM recognition_history 
+                           WHERE zone_name LIKE %s 
+                           AND recognition_time >= %s 
+                           AND recognition_time < %s 
+                           ORDER BY recognition_time DESC"""
+                cursor.execute(query, (f"%{zone_name}%", start_time, end_time))
+            else:
+                query = """SELECT * FROM recognition_history 
+                           WHERE zone_name LIKE %s 
+                           AND recognition_time >= %s 
+                           ORDER BY recognition_time DESC"""
+                cursor.execute(query, (f"%{zone_name}%", start_time))
+                
+            rows = cursor.fetchall()
+            for row in rows:
+                desc = row.get("description", "")
+                if "无法识别" in desc or "无有效" in desc or "图像内容为空" in desc:
                     continue
                     
-    # 计算该阶段内，每次抓拍画面的平均作业人数
-    avg_workers = round(total_workers / count, 1) if count > 0 else 0
+                logs.append({
+                    "位置": row["zone_name"],
+                    "人数": row["workers"],
+                    "当前作业工序": row["stage"],
+                    "视觉确认描述": desc,
+                    "识别时间": row["recognition_time"].strftime("%Y-%m-%d %H:%M:%S")
+                })
+                
+                workers_str = str(row["workers"])
+                workers_cnt = 0
+                nums = re.findall(r'\d+', workers_str)
+                if nums:
+                    workers_cnt = int(nums[0])
+                elif "多" in workers_str or "若干" in workers_str:
+                    workers_cnt = 5
+                    
+                total_workers += workers_cnt
+                count += 1
+    except Exception as e:
+        print(f"提取明细异常: {e}")
+    finally:
+        conn.close()
 
-    # 【修复新增逻辑】：计算实际经历的天数，以得出投入人天
+    avg_workers = round(total_workers / count, 1) if count > 0 else 0
     start_t_obj = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
     if end_time:
         end_t_obj = datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
     else:
         end_t_obj = datetime.now()
         
-    # 计算总秒数换算为天数（不足1天按1天算，避免除0或数值太小）
     duration_days = max((end_t_obj - start_t_obj).total_seconds() / 86400, 1.0)
     total_man_days = round(avg_workers * duration_days, 1)
 
-    logs.reverse() # 倒序，最新的记录在最上面
-    
-    # 将 total_man_days 一并返回给前端
     return {"logs": logs, "avg_workers": avg_workers, "count": count, "total_man_days": total_man_days}
 
+# ================= 计划上传与保存 =================
 @app.post("/api/plan/upload")
 async def upload_and_parse_plan(file: UploadFile = File(...)):
     raw_text = ""
@@ -441,7 +454,6 @@ async def upload_and_parse_plan(file: UploadFile = File(...)):
     
     try:
         file_bytes = await file.read()
-        import io
         file_stream = io.BytesIO(file_bytes)
 
         if file_ext in ['xlsx', 'xls']:
@@ -456,46 +468,66 @@ async def upload_and_parse_plan(file: UploadFile = File(...)):
         if not raw_text.strip():
             return {"status": "error", "message": "未能提取到文本"}
             
-        # 调用大模型解析
         parsed_plan = parser.parse_project_plan(raw_text)
-        
-        # --- 调试代码：在返回给前端前，最后一次确认数据 ---
-        print(f"DEBUG: 准备发送给前端的数据样例: {parsed_plan[0] if parsed_plan else '空'}")
-        
-        # 显式确保每个字典都包含必要的键
         return {
             "status": "success", 
             "message": "解析成功", 
-            "data": parsed_plan # 这里的 parsed_plan 必须是包含 'stage' 的字典列表
+            "data": parsed_plan 
         }
-        
     except Exception as e:
         return {"status": "error", "message": f"解析异常: {str(e)}"}
-    
-    # ================= 进度计划保存接口 =================
-# 定义前端传过来的单条计划的数据结构
+
 class PlanItem(BaseModel):
     floor: str = ""
     stage: str = "默认工序"
     planned_start: str = ""
     planned_end: str = ""
 
-# 定义接收的整体数据结构（一个包含多条计划的列表）
 class PlanSaveRequest(BaseModel):
     plans: list[PlanItem]
 
+@app.get("/api/plan")
+def get_project_plan():
+    """页面刷新时，前端调用此接口获取已保存的进度计划回显到表格中"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            # 按插入顺序查出所有的计划
+            cursor.execute("SELECT floor, stage, planned_start, planned_end FROM project_plan ORDER BY id ASC")
+            rows = cursor.fetchall()
+            return {"status": "success", "data": rows}
+    except Exception as e:
+        return {"status": "error", "message": f"获取计划失败: {str(e)}", "data": []}
+    finally:
+        conn.close()
+
 @app.post("/api/plan/save")
 def save_project_plan(req: PlanSaveRequest):
-    """保存前端提交的进度计划表"""
+    """保存前端提交的进度计划表，并与全局楼层实现联动更新"""
+    conn = get_db_connection()
     try:
-        # 将进度计划保存到 data 目录下的 project_plan.json 文件中
-        plan_path = os.path.join(settings.DATA_DIR, "project_plan.json")
-        
-        # 将 Pydantic 模型转换为字典并写入文件
-        with open(plan_path, "w", encoding="utf-8") as f:
-            json.dump([p.dict() for p in req.plans], f, ensure_ascii=False, indent=4)
+        with conn.cursor() as cursor:
+            # 1. 保存计划至 MySQL
+            cursor.execute("TRUNCATE TABLE project_plan")
+            if req.plans:
+                sql = "INSERT INTO project_plan (floor, stage, planned_start, planned_end) VALUES (%s, %s, %s, %s)"
+                vals = [(p.floor, p.stage, p.planned_start, p.planned_end) for p in req.plans]
+                cursor.executemany(sql, vals)
             
-        return {"status": "success", "message": "进度计划已成功保存！"}
-        
+            # 2. 核心联动：提取不重复的楼层序列，同步覆写回 config 的 floors 里
+            extracted_floors = []
+            for p in req.plans:
+                if p.floor and p.floor not in extracted_floors:
+                    extracted_floors.append(p.floor)
+            
+            if extracted_floors:
+                floors_json = json.dumps(extracted_floors, ensure_ascii=False)
+                cursor.execute("UPDATE project_config SET floors=%s WHERE id=1", (floors_json,))
+            
+            conn.commit()
+            
+        return {"status": "success", "message": "进度计划已成功保存，全局楼层序列已同步更新！"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"保存计划失败: {str(e)}")
+    finally:
+        conn.close()

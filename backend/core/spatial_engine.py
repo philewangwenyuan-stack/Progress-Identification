@@ -16,11 +16,21 @@ def get_db_connection():
     )
 
 def get_floor_sequence():
-    """读取自定义楼层配置"""
-    config_path = "data/project_config.json"
-    if os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
-            return json.load(f).get("floors", ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"])
+    """【核心修复】：读取 MySQL 中的全局联动楼层配置，彻底抛弃本地 JSON"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT floors FROM project_config WHERE id = 1")
+            row = cursor.fetchone()
+            if row and row[0]:
+                # 兼容处理：确保提取出来的是 Python 列表
+                if isinstance(row[0], str):
+                    return json.loads(row[0])
+                return row[0]
+    except Exception as e:
+        print(f"获取楼层序列异常: {e}")
+    finally:
+        conn.close()
     return [str(i) for i in range(1, 21)]
 
 class ZoneProgressTracker:
@@ -60,7 +70,6 @@ class ZoneProgressTracker:
                                  end_time DATETIME)''')
                 conn.commit()
                 
-                # 注意：MySQL 使用 %s 作为占位符
                 cursor.execute("SELECT floor, stage, is_poured FROM zone_states_v2 WHERE zone_name = %s", (self.zone_name,))
                 row = cursor.fetchone()
                 
@@ -180,14 +189,40 @@ class ZoneProgressTracker:
 
 class ProjectProgressManager:
     def __init__(self):
-        # 移除了 db_path 参数，统一使用配置文件中的 MySQL 连接
         self.zones = {}
 
     def parse_json_log(self, json_record):
         zone_name = json_record.get("位置")
-        if not zone_name: 
+        if not zone_name or zone_name == "识别失败": 
             return
             
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute('''CREATE TABLE IF NOT EXISTS recognition_history 
+                                (id INT AUTO_INCREMENT PRIMARY KEY,
+                                 zone_name VARCHAR(255), 
+                                 workers VARCHAR(50), 
+                                 stage VARCHAR(100), 
+                                 description TEXT,
+                                 recognition_time DATETIME,
+                                 image_path VARCHAR(500))''')
+                
+                cursor.execute("""INSERT INTO recognition_history 
+                                  (zone_name, workers, stage, description, recognition_time, image_path)
+                                  VALUES (%s, %s, %s, %s, %s, %s)""",
+                               (zone_name, 
+                                str(json_record.get("人数", "")), 
+                                json_record.get("当前作业工序", ""), 
+                                json_record.get("视觉确认描述", ""), 
+                                json_record.get("识别时间", ""),
+                                json_record.get("原始图片路径", "")))
+                conn.commit()
+        except Exception as e:
+            print(f"记录保存至MySQL失败: {e}")
+        finally:
+            conn.close()
+
         if zone_name not in self.zones:
             self.zones[zone_name] = ZoneProgressTracker(zone_name)
             
@@ -198,6 +233,20 @@ class ProjectProgressManager:
         conn = get_db_connection()
         try:
             with conn.cursor() as cursor:
+                # 【核心修复】：为防止刚开机时表不存在引发 500 报错，前置建表逻辑！
+                cursor.execute('''CREATE TABLE IF NOT EXISTS zone_states_v2 
+                                (zone_name VARCHAR(255) PRIMARY KEY, 
+                                 floor VARCHAR(50), 
+                                 stage VARCHAR(100), 
+                                 is_poured TINYINT(1))''')
+                cursor.execute('''CREATE TABLE IF NOT EXISTS stage_timeline 
+                                (id INT AUTO_INCREMENT PRIMARY KEY,
+                                 zone_name VARCHAR(255), 
+                                 floor VARCHAR(50), 
+                                 stage VARCHAR(100), 
+                                 start_time DATETIME, 
+                                 end_time DATETIME)''')
+
                 cursor.execute("SELECT 1 FROM zone_states_v2 WHERE zone_name = %s", (zone_name,))
                 if cursor.fetchone():
                     cursor.execute("UPDATE zone_states_v2 SET floor = %s, stage = %s, is_poured = 0 WHERE zone_name = %s", 
@@ -215,19 +264,15 @@ class ProjectProgressManager:
             self.zones[zone_name] = ZoneProgressTracker(zone_name)
             
         print(f"!!! [手动修正] {zone_name} 已强制重置为 {target_floor} 层 {target_stage}")
-        
-        if zone_name in self.zones:
-            self.zones[zone_name].refresh_from_db()    
 
     def reset_project(self):
-        """标准安全重置：使用 MySQL 的 TRUNCATE 彻底清空表并重置自增ID"""
         conn = get_db_connection()
         try:
             with conn.cursor() as cursor:
                 try:
-                    # TRUNCATE 会清空数据并自动重置 AUTO_INCREMENT 到 1，比 DELETE 更高效
                     cursor.execute("TRUNCATE TABLE zone_states_v2")
                     cursor.execute("TRUNCATE TABLE stage_timeline")
+                    cursor.execute("TRUNCATE TABLE recognition_history")
                 except Exception as e:
                     print(f"重置表时发生警告(可能是表尚不存在): {e}")
                 conn.commit()
