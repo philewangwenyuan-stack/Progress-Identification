@@ -254,25 +254,13 @@
           <p style="margin-top: 15px;"><b>视觉抓拍总次数：</b> <b>{{ currentDetails?.count || 0 }}</b> 次</p>
           <p>
             <b>日均作业人数：</b> 
-            <span style="color: #409EFF; font-weight: bold; font-size: 18px;">{{ localAvgWorkers }}</span> 人/天
+            <span style="color: #409EFF; font-weight: bold; font-size: 18px;">{{ currentDetails?.avg_workers || 0 }}</span> 人/天
             &nbsp;&nbsp;|&nbsp;&nbsp;
             <b>累计投入人天：</b> 
-            <span style="color: #67C23A; font-weight: bold; font-size: 18px;">{{ localTotalManDays }}</span> 人·天
-            <span style="font-size: 12px; color: #909399; margin-left: 10px;">(基于实际施工区间自动核算)</span>
+            <span style="color: #67C23A; font-weight: bold; font-size: 18px;">{{ currentDetails?.total_man_days || 0 }}</span> 人·天
           </p>
         </div>
-
-        <div style="margin: 20px 0; padding: 15px; background: #fff; border-radius: 6px; border: 1px solid #ebeef5; box-shadow: 0 2px 8px rgba(0,0,0,0.04);">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-            <span style="font-weight: bold; color: #303133; font-size: 15px;">📈 劳动力投入时序趋势</span>
-            <el-radio-group v-model="chartViewType" size="small" @change="renderChart">
-              <el-radio-button label="hour">按小时汇总</el-radio-button>
-              <el-radio-button label="day">按天汇总</el-radio-button>
-            </el-radio-group>
-          </div>
-          <div ref="chartRef" style="width: 100%; height: 260px;"></div>
-        </div>
-
+        
         <div class="log-history-list">
           <div v-if="!currentDetails?.logs || currentDetails.logs.length === 0" style="text-align: center; color: #999; margin-top: 20px;">
             暂无对应的抓拍日志。
@@ -402,30 +390,12 @@
 </template>
 
 <script setup>
-import * as echarts from 'echarts'
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import axios from 'axios'
 import { Setting, Edit, Delete, UploadFilled, Loading, Plus, Calendar } from '@element-plus/icons-vue'
 
 const apiBase = 'http://localhost:8000/api'
-
-// ======= 新增：配置 Axios 全局超时与错误拦截 =======
-axios.defaults.timeout = 5000; // 强制设置 5 秒超时，避免无限加载
-
-axios.interceptors.response.use(
-  response => response,
-  error => {
-    // 统一处理网络超时或被拒的情况
-    if (error.code === 'ECONNABORTED' || error.message.includes('timeout') || error.message === 'Network Error') {
-      ElMessage.error({
-        message: "网络请求超时或失败！请检查 Python 后端及 MySQL 是否已启动",
-        duration: 5000
-      });
-    }
-    return Promise.reject(error);
-  }
-);
 
 const isParsing = ref(false)
 const parsedPlanList = ref([])
@@ -568,146 +538,11 @@ const refreshDetails = async () => {
         ignore_stage_time: ignoreStageTime.value
       }
     });
-    
     currentDetails.value = { ...row, ...res.data };
-    
-    // ====== 修改点：获取到数据后，触发重算与绘图 ======
-    recalculateManDays(currentDetails.value);
-    nextTick(() => {
-      // 确保 DOM 加载完成后渲染图表
-      if (chartInstance) {
-          chartInstance.resize(); // 每次打开弹窗重置大小
-      }
-      renderChart();
-    });
   } catch(e) { 
     ElMessage.error("获取详情失败，请检查控制台");
   }
 }
-
-// ================= 新增：图表与重新计算逻辑 =================
-const chartRef = ref(null)
-const chartViewType = ref('day') // 默认按天查看
-let chartInstance = null
-
-const localAvgWorkers = ref(0)
-const localTotalManDays = ref(0)
-
-// 1. 基于实际开始时间和实际结束时间，在前端严格重算人天
-const recalculateManDays = (details) => {
-  if (!details || !details.logs) return;
-  
-  const logs = details.logs;
-  let actualStart = new Date(details.start_time);
-  let actualEnd = details.end_time ? new Date(details.end_time) : new Date(); // 如果没有结束时间，算到当前时间
-  
-  if (isNaN(actualStart.getTime())) actualStart = new Date();
-
-  // 计算工序经历的实际天数（至少1天）
-  const diffTime = Math.abs(actualEnd - actualStart);
-  const diffDays = Math.max(1, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
-
-  // 聚合每天的【最大抓拍人数】作为当天的出勤人数
-  const dailyMax = {};
-  logs.forEach(log => {
-    if (!log['识别时间']) return;
-    const logTime = new Date(log['识别时间']);
-    
-    // 只统计在实际开始和结束时间范围内的日志
-    if (logTime >= actualStart && logTime <= actualEnd) {
-      const dayKey = log['识别时间'].substring(0, 10);
-      const workers = parseInt(log['人数']) || 0;
-      if (!dailyMax[dayKey] || workers > dailyMax[dayKey]) {
-        dailyMax[dayKey] = workers;
-      }
-    }
-  });
-
-  // 累加计算总人天
-  let total = 0;
-  for (const day in dailyMax) {
-    total += dailyMax[day];
-  }
-
-  localTotalManDays.value = total;
-  localAvgWorkers.value = (total / diffDays).toFixed(1);
-}
-
-// 2. 渲染 ECharts 劳动力趋势图
-const renderChart = () => {
-  if (!chartRef.value || !currentDetails.value?.logs) return;
-  
-  if (!chartInstance) {
-    chartInstance = echarts.init(chartRef.value);
-  }
-
-  const logs = currentDetails.value.logs;
-  const timeData = {};
-
-  logs.forEach(log => {
-    if (!log['识别时间']) return;
-    
-    let timeKey = '';
-    if (chartViewType.value === 'day') {
-      timeKey = log['识别时间'].substring(0, 10); // 取 YYYY-MM-DD
-    } else {
-      timeKey = log['识别时间'].substring(0, 13) + ':00'; // 取 YYYY-MM-DD HH
-    }
-
-    const workers = parseInt(log['人数']) || 0;
-    
-    if (!timeData[timeKey]) {
-      timeData[timeKey] = [];
-    }
-    timeData[timeKey].push(workers);
-  });
-
-  // X轴：时间节点排序
-  const xAxisData = Object.keys(timeData).sort();
-  
-  // Y轴：取该时间段（某天 或 某小时）内的最大抓拍人数作为代表量
-  const yAxisData = xAxisData.map(key => {
-    return Math.max(...timeData[key]);
-  });
-
-  const option = {
-    tooltip: { 
-      trigger: 'axis',
-      formatter: '{b} <br/> 抓拍劳动力: <b>{c}</b> 人'
-    },
-    grid: { left: '3%', right: '4%', bottom: '5%', top: '15%', containLabel: true },
-    xAxis: {
-      type: 'category',
-      data: xAxisData,
-      axisLabel: { 
-        rotate: chartViewType.value === 'hour' ? 45 : 0, // 小时视图标签倾斜防重叠
-        fontSize: 11
-      }
-    },
-    yAxis: {
-      type: 'value',
-      name: '人数',
-      minInterval: 1 // 人数必须是整数
-    },
-    series: [
-      {
-        data: yAxisData,
-        type: chartViewType.value === 'hour' ? 'line' : 'bar', // 小时用折线图，按天用柱状图效果更好
-        smooth: true,
-        barMaxWidth: 30,
-        areaStyle: chartViewType.value === 'hour' ? { opacity: 0.2, color: '#409EFF' } : null,
-        itemStyle: { color: '#409EFF', borderRadius: [4, 4, 0, 0] },
-        label: {
-          show: true,
-          position: 'top'
-        }
-      }
-    ]
-  };
-
-  chartInstance.setOption(option);
-}
-// ==========================================================
 
 const fetchLatestLog = async () => {
   try {
@@ -761,15 +596,10 @@ const addLog = (msg, type = 'info') => {
   nextTick(() => { if (terminalRef.value) terminalRef.value.scrollTop = terminalRef.value.scrollHeight })
 }
 
-
 const fetchConfig = async () => {
-  try {
-    const res = await axios.get(`${apiBase}/config`)
-    config.value = res.data
-    configForm.value = { ...res.data, floors_str: (res.data.floors || []).join(',') }
-  } catch (error) {
-    console.error("配置获取失败:", error)
-  }
+  const res = await axios.get(`${apiBase}/config`)
+  config.value = res.data
+  configForm.value = { ...res.data, floors_str: (res.data.floors || []).join(',') }
 }
 
 // 新增：从后端拉取已经保存的进度计划
@@ -786,15 +616,11 @@ const fetchPlanList = async () => {
 }
 
 const fetchProgress = async () => {
-  try {
-    const res = await axios.get(`${apiBase}/progress`)
-    progressData.value = res.data.data || []
-    if(progressData.value.length > 0 && !selectedZone.value) {
-      selectedZone.value = progressData.value[0].zone_name
-      fetchTimeline()
-    }
-  } catch (error) {
-    console.error("获取进度失败，请检查后端或数据库是否启动:", error);
+  const res = await axios.get(`${apiBase}/progress`)
+  progressData.value = res.data.data || []
+  if(progressData.value.length > 0 && !selectedZone.value) {
+    selectedZone.value = progressData.value[0].zone_name
+    fetchTimeline()
   }
 }
 
